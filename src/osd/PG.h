@@ -1072,7 +1072,6 @@ public:
       epoch_start(0),
       active(false), queue_snap_trim(false),
       waiting_on(0), shallow_errors(0), deep_errors(0), fixed(0),
-      active_rep_scrub(0),
       must_scrub(false), must_deep_scrub(false), must_repair(false),
       num_digest_updates_pending(0),
       state(INACTIVE),
@@ -1096,7 +1095,7 @@ public:
     int fixed;
     ScrubMap primary_scrubmap;
     map<pg_shard_t, ScrubMap> received_maps;
-    MOSDRepScrub *active_rep_scrub;
+    OpRequestRef active_rep_scrub;
     utime_t scrub_reg_stamp;  // stamp we registered for
 
     // flags to indicate explicitly requested scrubs (by admin)
@@ -1182,8 +1181,7 @@ public:
       waiting_on = 0;
       waiting_on_whom.clear();
       if (active_rep_scrub) {
-        active_rep_scrub->put();
-        active_rep_scrub = NULL;
+        active_rep_scrub = OpRequestRef();
       }
       received_maps.clear();
 
@@ -1267,7 +1265,7 @@ public:
   void unreg_next_scrub();
 
   void replica_scrub(
-    struct MOSDRepScrub *op,
+    OpRequestRef op,
     ThreadPool::TPHandle &handle);
   void sub_op_scrub_map(OpRequestRef op);
   void sub_op_scrub_reserve(OpRequestRef op);

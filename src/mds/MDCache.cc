@@ -3547,6 +3547,67 @@ void MDCache::remove_inode_recursive(CInode *in)
   remove_inode(in);
 }
 
+bool MDCache::expire_recursive(
+  CInode *in,
+  map<mds_rank_t, MCacheExpire*>& expiremap,
+  CDir *subtree)
+{
+  assert(!in->is_auth());
+
+  dout(10) << __func__ << ":" << *in << dendl;
+
+  mds_rank_t owner = subtree->dir_auth.first;
+  if (expiremap.count(owner) == 0)  {
+    expiremap[owner] = new MCacheExpire(mds->get_nodeid());
+  }
+  MCacheExpire *expire_msg = expiremap[owner];
+
+  // Enumerate any dirfrags beneath this inode
+  list<CDir*> ls;
+  in->get_dirfrags(ls);
+  if (in->get_num_ref() > (int)ls.size()) {
+    dout(20) << __func__ << ": too many refs (" << in->get_num_ref()
+            << ")" << dendl;
+    return true;
+  }
+
+  // Recurse into any dirfrags beneath this inode
+  list<CDir*>::iterator p = ls.begin();
+  for (std::list<CDir*>::iterator p = ls.begin(); p != ls.end(); ++p) {
+    CDir *subdir = *p;
+
+    dout(10) << " removing dirfrag " << subdir << dendl;
+    for (CDir::map_t::iterator q = subdir->items.begin();
+         q != subdir->items.end(); ++q) {
+      CDentry *dn = q->second;
+      CDentry::linkage_t *dnl = dn->get_linkage();
+      if (dnl->is_primary()) {
+	CInode *tin = dnl->get_inode();
+	const bool abort = expire_recursive(tin, expiremap, subtree);
+        if (abort) {
+          return true;
+        }
+	subdir->unlink_inode(dn);
+        remove_inode(tin);
+      }
+
+      expire_msg->add_dentry(subtree->dirfrag(), subdir->dirfrag(), dn->name, dn->last, dn->get_replica_nonce());
+
+      subdir->remove_dentry(dn);
+      dn = NULL;
+    }
+    expire_msg->add_dir(subtree->dirfrag(), subdir->dirfrag(), subdir->replica_nonce);
+    if (subdir->is_subtree_root()) {
+      remove_subtree(subdir);
+    }
+    in->close_dirfrag(subdir->dirfrag().frag);
+  }
+
+  expire_msg->add_inode(subtree->dirfrag(), in->vino(), in->get_replica_nonce());
+
+  return false;
+}
+
 void MDCache::trim_unlinked_inodes()
 {
   dout(7) << "trim_unlinked_inodes" << dendl;
@@ -6155,6 +6216,33 @@ bool MDCache::trim(int max, int count)
     }
     if (root->get_num_ref() == 0)
       trim_inode(0, root, 0, expiremap);
+  }
+
+  // Trim remote stray dirs for stopping MDS ranks
+  std::list<CDir*> subtree_list;
+  list_subtrees(subtree_list);  // Take copy because will modify in loop
+  for (std::list<CDir*>::iterator s = subtree_list.begin();
+       s != subtree_list.end(); ++s) {
+    CDir *subtree = *s;
+    if (subtree->inode->is_mdsdir()) {
+      mds_rank_t owner = mds_rank_t(MDS_INO_MDSDIR_OWNER(subtree->inode->ino()));
+      if (owner == mds->whoami) {
+        continue;
+      }
+
+      dout(20) << __func__ << ": checking remote MDS dir " << *(subtree) << dendl;
+
+      const MDSMap::mds_info_t &owner_info = mds->mdsmap->get_mds_info(owner);
+      if (owner_info.state == MDSMap::STATE_STOPPING) {
+        dout(20) << __func__ << ": it's stopping, remove it" << dendl;
+	const bool aborted = expire_recursive(subtree->inode, expiremap, subtree);
+        if (!aborted) {
+          remove_inode(subtree->inode);
+        }
+      } else {
+        dout(20) << __func__ << ": not stopping, leaving it alone" << dendl;
+      }
+    }
   }
 
   // send any expire messages

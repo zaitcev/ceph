@@ -1064,6 +1064,7 @@ public:
   void process_delayed_expire(CDir *dir);
   void discard_delayed_expire(CDir *dir);
 
+  void notify_mdsmap_changed();
 
   // == crap fns ==
  public:

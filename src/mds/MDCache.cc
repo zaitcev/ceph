@@ -11508,4 +11508,8 @@ void MDCache::maybe_eval_stray(CInode *in, bool delay) {
   }
 }
 
+void MDCache::notify_mdsmap_changed()
+{
+  stray_manager.update_op_limit();
+}
 

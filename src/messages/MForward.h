@@ -25,43 +25,44 @@
 
 struct MForward : public Message {
   uint64_t tid;
-  PaxosServiceMessage *msg;
   entity_inst_t client;
   MonCap client_caps;
   uint64_t con_features;
   EntityName entity_name;
+  PaxosServiceMessage *msg;
+  bufferlist msg_bl;
 
-  static const int HEAD_VERSION = 3;
+  static const int HEAD_VERSION = 4;
   static const int COMPAT_VERSION = 1;
 
   MForward() : Message(MSG_FORWARD, HEAD_VERSION, COMPAT_VERSION),
-               tid(0), msg(NULL), con_features(0) {}
+               tid(0), con_features(0), msg(NULL) {}
   //the message needs to have caps filled in!
   MForward(uint64_t t, PaxosServiceMessage *m, uint64_t feat) :
     Message(MSG_FORWARD, HEAD_VERSION, COMPAT_VERSION),
-    tid(t), msg(m) {
+    tid(t), msg(NULL) {
     client = m->get_source_inst();
     client_caps = m->get_session()->caps;
     con_features = feat;
+    set_message(m, feat);
   }
   MForward(uint64_t t, PaxosServiceMessage *m, uint64_t feat,
-	   const MonCap& caps) :
+           const MonCap& caps) :
     Message(MSG_FORWARD, HEAD_VERSION, COMPAT_VERSION),
-    tid(t), msg(m), client_caps(caps) {
+    tid(t), client_caps(caps), msg(NULL) {
     client = m->get_source_inst();
     con_features = feat;
+    set_message(m, feat);
   }
 private:
-  ~MForward() {
-    if (msg) msg->put();
-  }
+  ~MForward() { }
 
 public:
   void encode_payload(uint64_t features) {
     ::encode(tid, payload);
     ::encode(client, payload);
     ::encode(client_caps, payload, features);
-    encode_message(msg, features, payload);
+    ::encode(msg_bl, payload);
     ::encode(con_features, payload);
     ::encode(entity_name, payload);
   }
@@ -71,7 +72,11 @@ public:
     ::decode(tid, p);
     ::decode(client, p);
     ::decode(client_caps, p);
-    msg = (PaxosServiceMessage *)decode_message(NULL, 0, p);
+    if (header.version > 3) {
+      ::decode(msg_bl, p);
+    } else {
+      msg = (PaxosServiceMessage *)decode_message(NULL, 0, p);
+    }
     if (header.version >= 2) {
       ::decode(con_features, p);
     } else {
@@ -86,6 +91,22 @@ public:
       entity_name.set(client.name.type(), "?");
     }
 
+  }
+
+  void set_message(PaxosServiceMessage *m, uint64_t features) {
+    encode_message(m, features, msg_bl);
+  }
+
+  PaxosServiceMessage *claim_message() {
+    if (!msg) {
+      bufferlist::iterator p = msg_bl.begin();
+      return (msg_bl.length() ?
+          (PaxosServiceMessage*)decode_message(NULL, 0, p) : NULL);
+    }
+
+    PaxosServiceMessage *m = msg;
+    msg = NULL;
+    return m;
   }
 
   const char *get_type_name() const { return "forward"; }

@@ -190,8 +190,9 @@ void Paxos::collect(version_t oldpn)
 
 
 // peon
-void Paxos::handle_collect(MMonPaxos *collect)
+void Paxos::handle_collect(MonOpRequestRef op)
 {
+  MMonPaxos *collect = static_cast<MMonPaxos*>(op->get_req());
   dout(10) << "handle_collect " << *collect << dendl;
 
   assert(mon->is_peon()); // mon epoch filter should catch strays
@@ -447,8 +448,9 @@ void Paxos::_sanity_check_store()
 
 
 // leader
-void Paxos::handle_last(MMonPaxos *last)
+void Paxos::handle_last(MonOpRequestRef op)
 {
+  MMonPaxos *last = static_cast<MMonPaxos*>(op->get_req());
   bool need_refresh = false;
   int from = last->get_source().num();
 
@@ -687,8 +689,9 @@ void Paxos::begin(bufferlist& v)
 }
 
 // peon
-void Paxos::handle_begin(MMonPaxos *begin)
+void Paxos::handle_begin(MonOpRequestRef op)
 {
+  MMonPaxos *begin = static_cast<MMonPaxos*>(op->get_req());
   dout(10) << "handle_begin " << *begin << dendl;
 
   // can we accept this?
@@ -747,8 +750,9 @@ void Paxos::handle_begin(MMonPaxos *begin)
 }
 
 // leader
-void Paxos::handle_accept(MMonPaxos *accept)
+void Paxos::handle_accept(MonOpRequestRef op)
 {
+  MMonPaxos *accept = static_cast<MMonPaxos*>(op->get_req());
   dout(10) << "handle_accept " << *accept << dendl;
   int from = accept->get_source().num();
 
@@ -915,8 +919,9 @@ void Paxos::commit_finish()
 }
 
 
-void Paxos::handle_commit(MMonPaxos *commit)
+void Paxos::handle_commit(MonOpRequestRef op)
 {
+  MMonPaxos *commit = static_cast<MMonPaxos*>(op->get_req());
   dout(10) << "handle_commit on " << commit->last_committed << dendl;
 
   logger->inc(l_paxos_commit);
@@ -1059,8 +1064,9 @@ void Paxos::finish_round()
 
 
 // peon
-void Paxos::handle_lease(MMonPaxos *lease)
+void Paxos::handle_lease(MonOpRequestRef op)
 {
+  MMonPaxos *lease = static_cast<MMonPaxos*>(op->get_req());
   // sanity
   if (!mon->is_peon() ||
       last_committed != lease->last_committed) {
@@ -1107,8 +1113,9 @@ void Paxos::handle_lease(MMonPaxos *lease)
   lease->put();
 }
 
-void Paxos::handle_lease_ack(MMonPaxos *ack)
+void Paxos::handle_lease_ack(MonOpRequestRef op)
 {
+  MMonPaxos *ack = static_cast<MMonPaxos*>(op->get_req());
   int from = ack->get_source().num();
 
   if (!lease_ack_timeout_event) {
@@ -1361,8 +1368,9 @@ void Paxos::restart()
 }
 
 
-void Paxos::dispatch(PaxosServiceMessage *m)
+void Paxos::dispatch(MonOpRequestRef op)
 {
+  PaxosServiceMessage *m = static_cast<PaxosServiceMessage*>(op->get_req());
   // election in progress?
   if (!mon->is_leader() && !mon->is_peon()) {
     dout(5) << "election in progress, dropping " << *m << dendl;
@@ -1384,25 +1392,25 @@ void Paxos::dispatch(PaxosServiceMessage *m)
       switch (pm->op) {
 	// learner
       case MMonPaxos::OP_COLLECT:
-	handle_collect(pm);
+	handle_collect(op);
 	break;
       case MMonPaxos::OP_LAST:
-	handle_last(pm);
+	handle_last(op);
 	break;
       case MMonPaxos::OP_BEGIN:
-	handle_begin(pm);
+	handle_begin(op);
 	break;
       case MMonPaxos::OP_ACCEPT:
-	handle_accept(pm);
+	handle_accept(op);
 	break;		
       case MMonPaxos::OP_COMMIT:
-	handle_commit(pm);
+	handle_commit(op);
 	break;
       case MMonPaxos::OP_LEASE:
-	handle_lease(pm);
+	handle_lease(op);
 	break;
       case MMonPaxos::OP_LEASE_ACK:
-	handle_lease_ack(pm);
+	handle_lease_ack(op);
 	break;
       default:
 	assert(0);

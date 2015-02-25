@@ -1002,3 +1002,30 @@ void cap_reconnect_t::generate_test_instances(list<cap_reconnect_t*>& ls)
   ls.back()->path = "/test/path";
   ls.back()->capinfo.cap_id = 1;
 }
+
+void MDSCacheObject::dump(Formatter *f) const
+{
+  f->dump_bool("is_auth", is_auth());
+
+  f->open_object_section("replicas");
+  const std::map<mds_rank_t,unsigned>& replicas = get_replicas();
+  for (std::map<mds_rank_t,unsigned>::const_iterator i = replicas.begin();
+       i != replicas.end(); ++i) {
+    std::ostringstream rank_str;
+    rank_str << i->first;
+    f->dump_int(rank_str.str().c_str(), i->second);
+  }
+  f->close_section();
+
+  f->open_array_section("authority");
+  f->dump_int("first", authority().first);
+  f->dump_int("second", authority().second);
+  f->close_section();
+  f->dump_int("replica_nonce", get_replica_nonce());
+
+  f->dump_int("auth_pins", auth_pins);
+  f->dump_int("nested_auth_pins", nested_auth_pins);
+
+  dump_pin_set(f);
+}
+

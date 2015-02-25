@@ -3536,8 +3536,6 @@ void InodeStore::dump(Formatter *f) const
 {
   inode.dump(f);
   f->dump_string("symlink", symlink);
-  // FIXME: dirfragtree: dump methods for fragtree_t
-  // FIXME: xattrs: JSON-safe versions of binary xattrs
   f->open_array_section("old_inodes");
   for (std::map<snapid_t, old_inode_t>::const_iterator i = old_inodes.begin(); i != old_inodes.end(); ++i) {
     f->open_object_section("old_inode");
@@ -3816,6 +3814,7 @@ void CInode::validated_data::dump(Formatter *f) const
 void CInode::dump(Formatter *f) const
 {
   InodeStore::dump(f);
-  dump_pin_set(f);
+
+  MDSCacheObject::dump(f);
 }
 

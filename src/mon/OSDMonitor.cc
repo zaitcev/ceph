@@ -1077,7 +1077,6 @@ bool OSDMonitor::preprocess_query(MonOpRequestRef op)
     
   default:
     assert(0);
-    m->put();
     return true;
   }
 }
@@ -1111,7 +1110,6 @@ bool OSDMonitor::prepare_update(MonOpRequestRef op)
 
   default:
     assert(0);
-    m->put();
   }
 
   return false;
@@ -1166,7 +1164,6 @@ bool OSDMonitor::preprocess_get_osdmap(MonOpRequestRef op)
   reply->oldest_map = get_first_committed();
   reply->newest_map = osdmap.get_epoch();
   mon->send_reply(m, reply);
-  m->put();
   return true;
 }
 
@@ -1250,7 +1247,6 @@ bool OSDMonitor::preprocess_failure(MonOpRequestRef op)
   return false;
 
  didit:
-  m->put();
   return true;
 }
 
@@ -1274,7 +1270,6 @@ public:
 	false));   // ACK itself does not request an ack
   }
   ~C_AckMarkedDown() {
-    m->put();
   }
 };
 
@@ -1531,7 +1526,6 @@ bool OSDMonitor::prepare_failure(MonOpRequestRef op)
       dout(10) << " no failure_info for osd." << target_osd << dendl;
     }
     mon->no_reply(m);
-    m->put();
   }
   
   return false;
@@ -1657,7 +1651,6 @@ bool OSDMonitor::preprocess_boot(MonOpRequestRef op)
   return false;
 
  ignore:
-  m->put();
   return true;
 }
 
@@ -1676,7 +1669,6 @@ bool OSDMonitor::prepare_boot(MonOpRequestRef op)
   // does this osd exist?
   if (from >= osdmap.get_max_osd()) {
     dout(1) << "boot from osd." << from << " >= max_osd " << osdmap.get_max_osd() << dendl;
-    m->put();
     return false;
   }
 
@@ -1844,7 +1836,6 @@ bool OSDMonitor::preprocess_alive(MonOpRequestRef op)
   return false;
 
  ignore:
-  m->put();
   return true;
 }
 
@@ -1944,7 +1935,6 @@ bool OSDMonitor::preprocess_pgtemp(MonOpRequestRef op)
   return true;
 
  ignore:
-  m->put();
   return true;
 }
 
@@ -2015,7 +2005,6 @@ bool OSDMonitor::preprocess_remove_snaps(MonOpRequestRef op)
   }
 
  ignore:
-  m->put();
   return true;
 }
 
@@ -2046,8 +2035,6 @@ bool OSDMonitor::prepare_remove_snaps(MonOpRequestRef op)
       }
     }
   }
-
-  m->put();
   return true;
 }
 
@@ -6991,5 +6978,4 @@ void OSDMonitor::_pool_op_reply(MonOpRequestRef op,
   MPoolOpReply *reply = new MPoolOpReply(m->fsid, m->get_tid(),
 					 ret, epoch, get_last_committed(), blp);
   mon->send_reply(m, reply);
-  m->put();
 }

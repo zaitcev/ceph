@@ -1242,7 +1242,6 @@ void Monitor::handle_sync(MonOpRequestRef op)
     dout(0) << __func__ << " unknown op " << m->op << dendl;
     assert(0 == "unknown op");
   }
-  m->put();
 }
 
 // leader
@@ -1525,7 +1524,6 @@ void Monitor::handle_probe(MonOpRequestRef op)
 
   if (m->fsid != monmap->fsid) {
     dout(0) << "handle_probe ignoring fsid " << m->fsid << " != " << monmap->fsid << dendl;
-    m->put();
     return;
   }
 
@@ -1546,7 +1544,7 @@ void Monitor::handle_probe(MonOpRequestRef op)
     break;
 
   default:
-    m->put();
+    break;
   }
 }
 
@@ -1605,7 +1603,7 @@ void Monitor::handle_probe_probe(MonOpRequestRef op)
   }
 
  out:
-  m->put();
+  return;
 }
 
 void Monitor::handle_probe_reply(MonOpRequestRef op)
@@ -1616,7 +1614,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
 
   // discover name and addrs during probing or electing states.
   if (!is_probing() && !is_electing()) {
-    m->put();
     return;
   }
 
@@ -1634,7 +1631,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
 	       << ", mine was " << monmap->get_epoch() << dendl;
       delete newmap;
       monmap->decode(m->monmap_bl);
-      m->put();
 
       bootstrap();
       return;
@@ -1651,7 +1647,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
     monmap->rename(peer_name, m->name);
 
     if (is_electing()) {
-      m->put();
       bootstrap();
       return;
     }
@@ -1665,7 +1660,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
       monmap->get_addr(m->name).is_blank_ip()) {
     dout(1) << " learned initial mon " << m->name << " addr " << m->get_source_addr() << dendl;
     monmap->set_addr(m->name, m->get_source_addr());
-    m->put();
 
     bootstrap();
     return;
@@ -1673,7 +1667,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
 
   // end discover phase
   if (!is_probing()) {
-    m->put();
     return;
   }
 
@@ -1681,7 +1674,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
 
   if (is_synchronizing()) {
     dout(10) << " currently syncing" << dendl;
-    m->put();
     return;
   }
 
@@ -1702,7 +1694,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
 	       << dendl;
       cancel_probe_timeout();
       sync_start(other, true);
-      m->put();
       return;
     }
     if (paxos->get_version() + g_conf->paxos_max_join_drift < m->paxos_last_version) {
@@ -1712,7 +1703,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
 	       << dendl;
       cancel_probe_timeout();
       sync_start(other, false);
-      m->put();
       return;
     }
   }
@@ -1741,7 +1731,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
       outside_quorum.insert(m->name);
     } else {
       dout(10) << " mostly ignoring mon." << m->name << ", not part of monmap" << dendl;
-      m->put();
       return;
     }
 
@@ -1758,7 +1747,6 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
       dout(10) << " that's not yet enough for a new quorum, waiting" << dendl;
     }
   }
-  m->put();
 }
 
 void Monitor::join_election()
@@ -2560,8 +2548,6 @@ void Monitor::handle_command(MonOpRequestRef op)
     rs = ss.str();
     if (!m->get_source().is_mon())  // don't reply to mon->mon commands
       reply_command(m, r, rs, 0);
-    else
-      m->put();
     return;
   }
 
@@ -2897,8 +2883,6 @@ void Monitor::handle_command(MonOpRequestRef op)
  out:
   if (!m->get_source().is_mon())  // don't reply to mon->mon commands
     reply_command(m, r, rs, rdata, 0);
-  else
-    m->put();
 }
 
 void Monitor::reply_command(MMonCommand *m, int rc, const string &rs, version_t version)
@@ -2913,7 +2897,6 @@ void Monitor::reply_command(MMonCommand *m, int rc, const string &rs, bufferlist
   reply->set_tid(m->get_tid());
   reply->set_data(rdata);
   send_reply(m, reply);
-  m->put();
 }
 
 
@@ -3051,7 +3034,6 @@ void Monitor::handle_forward(MonOpRequestRef op)
     s->put();
   }
   session->put();
-  m->put();
 }
 
 void Monitor::try_send_message(Message *m, const entity_inst_t& to)
@@ -3129,7 +3111,6 @@ void Monitor::handle_route(MonOpRequestRef op)
     dout(0) << "MRoute received from entity without appropriate perms! "
 	    << dendl;
     session->put();
-    m->put();
     return;
   }
   if (m->msg)
@@ -3161,7 +3142,6 @@ void Monitor::handle_route(MonOpRequestRef op)
       m->msg = NULL;
     }
   }
-  m->put();
   if (session)
     session->put();
 }
@@ -3266,14 +3246,12 @@ void Monitor::waitlist_or_zap_client(MonOpRequestRef op)
   } else {
     dout(5) << "discarding message " << *m << " and sending client elsewhere" << dendl;
     con->mark_down();
-    m->put();
   }
 }
 
 void Monitor::_ms_dispatch(Message *m)
 {
   if (is_shutdown()) {
-    m->put();
     return;
   }
 
@@ -3354,7 +3332,6 @@ void Monitor::dispatch(MonOpRequestRef op)
   } else {
     dout(20) << "ms_dispatch existing session " << s << " for " << s->inst << dendl;
   }
-  op->set_session(s);
 
   if (s) {
     if (s->auth_handler) {
@@ -3522,7 +3499,6 @@ void Monitor::dispatch_op(MonOpRequestRef op)
        never sent by clients to us. */
     case MSG_LOGACK:
       log_client.handle_log_ack((MLogAck*)op->get_req());
-      //m->put();
       break;
 
     // monmap
@@ -3537,7 +3513,6 @@ void Monitor::dispatch_op(MonOpRequestRef op)
         if (!op->is_src_mon() ||
             !op->get_req_session()->is_capable("mon", MON_CAP_X)) {
           //can't send these!
-          pm->put();
           break;
         }
 
@@ -3546,18 +3521,15 @@ void Monitor::dispatch_op(MonOpRequestRef op)
           // good, thus just drop them and ignore them.
           dout(10) << __func__ << " ignore paxos msg from "
             << pm->get_source_inst() << dendl;
-          pm->put();
           break;
         }
 
         // sanitize
         if (pm->epoch > get_epoch()) {
           bootstrap();
-          pm->put();
           break;
         }
         if (pm->epoch != get_epoch()) {
-          pm->put();
           break;
         }
 
@@ -3572,7 +3544,6 @@ void Monitor::dispatch_op(MonOpRequestRef op)
           !op->get_req_session()->is_capable("mon", MON_CAP_X)) {
         dout(0) << "MMonElection received from entity without enough caps!"
           << op->get_req_session()->caps << dendl;
-        //m->put();
         break;
       }
       if (!is_probing() && !is_synchronizing()) {
@@ -3603,7 +3574,6 @@ void Monitor::dispatch_op(MonOpRequestRef op)
   return;
 
 drop:
-  //m->put();
   return;
 }
 
@@ -3631,7 +3601,6 @@ void Monitor::handle_ping(MonOpRequestRef op)
   reply->set_payload(payload);
   dout(10) << __func__ << " reply payload len " << reply->get_payload().length() << dendl;
   messenger->send_message(reply, inst);
-  m->put();
 }
 
 void Monitor::timecheck_start()
@@ -4006,7 +3975,6 @@ void Monitor::handle_timecheck(MonOpRequestRef op)
   } else {
     dout(1) << __func__ << " drop unexpected msg" << dendl;
   }
-  m->put();
 }
 
 void Monitor::handle_subscribe(MonOpRequestRef op)
@@ -4019,7 +3987,6 @@ void Monitor::handle_subscribe(MonOpRequestRef op)
   MonSession *s = static_cast<MonSession *>(m->get_connection()->get_priv());
   if (!s) {
     dout(10) << " no session, dropping" << dendl;
-    m->put();
     return;
   }
 
@@ -4061,7 +4028,6 @@ void Monitor::handle_subscribe(MonOpRequestRef op)
     m->get_connection()->send_message(new MMonSubscribeAck(monmap->get_fsid(), (int)g_conf->mon_subscribe_interval));
 
   s->put();
-  m->put();
 }
 
 void Monitor::handle_get_version(MonOpRequestRef op)
@@ -4073,7 +4039,6 @@ void Monitor::handle_get_version(MonOpRequestRef op)
   MonSession *s = static_cast<MonSession *>(m->get_connection()->get_priv());
   if (!s) {
     dout(10) << " no session, dropping" << dendl;
-    m->put();
     return;
   }
 
@@ -4108,7 +4073,6 @@ void Monitor::handle_get_version(MonOpRequestRef op)
     m->get_connection()->send_message(reply);
   }
 
-  m->put();
 
  out:
   s->put();
@@ -4181,7 +4145,6 @@ void Monitor::handle_mon_get_map(MonOpRequestRef op)
   MMonGetMap *m = static_cast<MMonGetMap*>(op->get_req());
   dout(10) << "handle_mon_get_map" << dendl;
   send_latest_monmap(m->get_connection().get());
-  m->put();
 }
 
 
@@ -4257,7 +4220,6 @@ void Monitor::handle_scrub(MonOpRequestRef op)
     }
     break;
   }
-  m->put();
 }
 
 void Monitor::_scrub(ScrubResult *r)

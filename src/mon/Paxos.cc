@@ -205,7 +205,6 @@ void Paxos::handle_collect(MonOpRequestRef op)
             << " leader's lowest version is too high for our last committed"
             << " (theirs: " << collect->first_committed
             << "; ours: " << last_committed << ") -- bootstrap!" << dendl;
-    collect->put();
     mon->bootstrap();
     return;
   }
@@ -285,7 +284,6 @@ void Paxos::handle_collect(MonOpRequestRef op)
 
   // send reply
   collect->get_connection()->send_message(last);
-  collect->put();
 }
 
 /**
@@ -458,7 +456,6 @@ void Paxos::handle_last(MonOpRequestRef op)
 
   if (!mon->is_leader()) {
     dout(10) << "not leader, dropping" << dendl;
-    last->put();
     return;
   }
 
@@ -473,7 +470,6 @@ void Paxos::handle_last(MonOpRequestRef op)
 	    << " lowest version is too high for our last committed"
             << " (theirs: " << last->first_committed
             << "; ours: " << last_committed << ") -- bootstrap!" << dendl;
-    last->put();
     mon->bootstrap();
     return;
   }
@@ -495,7 +491,6 @@ void Paxos::handle_last(MonOpRequestRef op)
 	      << " last_committed (" << p->second
 	      << ") is too low for our first_committed (" << first_committed
 	      << ") -- bootstrap!" << dendl;
-      last->put();
       mon->bootstrap();
       return;
     }
@@ -580,8 +575,6 @@ void Paxos::handle_last(MonOpRequestRef op)
 
   if (need_refresh)
     (void)do_refresh();
-
-  last->put();
 }
 
 void Paxos::collect_timeout()
@@ -697,7 +690,6 @@ void Paxos::handle_begin(MonOpRequestRef op)
   // can we accept this?
   if (begin->pn < accepted_pn) {
     dout(10) << " we accepted a higher pn " << accepted_pn << ", ignoring" << dendl;
-    begin->put();
     return;
   }
   assert(begin->pn == accepted_pn);
@@ -745,8 +737,6 @@ void Paxos::handle_begin(MonOpRequestRef op)
   accept->pn = accepted_pn;
   accept->last_committed = last_committed;
   begin->get_connection()->send_message(accept);
-  
-  begin->put();
 }
 
 // leader
@@ -759,12 +749,12 @@ void Paxos::handle_accept(MonOpRequestRef op)
   if (accept->pn != accepted_pn) {
     // we accepted a higher pn, from some other leader
     dout(10) << " we accepted a higher pn " << accepted_pn << ", ignoring" << dendl;
-    goto out;
+    return;
   }
   if (last_committed > 0 &&
       accept->last_committed < last_committed-1) {
     dout(10) << " this is from an old round, ignoring" << dendl;
-    goto out;
+    return;
   }
   assert(accept->last_committed == last_committed ||   // not committed
 	 accept->last_committed == last_committed-1);  // committed
@@ -786,9 +776,6 @@ void Paxos::handle_accept(MonOpRequestRef op)
     dout(10) << " got majority, committing, done with update" << dendl;
     commit_start();
   }
-
- out:
-  accept->put();
 }
 
 void Paxos::accept_timeout()
@@ -929,7 +916,6 @@ void Paxos::handle_commit(MonOpRequestRef op)
   if (!mon->is_peon()) {
     dout(10) << "not a peon, dropping" << dendl;
     assert(0);
-    commit->put();
     return;
   }
 
@@ -938,8 +924,6 @@ void Paxos::handle_commit(MonOpRequestRef op)
   if (do_refresh()) {
     finish_contexts(g_ceph_context, waiting_for_commit);
   }
-
-  commit->put();
 }
 
 void Paxos::extend_lease()
@@ -1072,7 +1056,6 @@ void Paxos::handle_lease(MonOpRequestRef op)
       last_committed != lease->last_committed) {
     dout(10) << "handle_lease i'm not a peon, or they're not the leader,"
 	     << " or the last_committed doesn't match, dropping" << dendl;
-    lease->put();
     return;
   }
 
@@ -1109,8 +1092,6 @@ void Paxos::handle_lease(MonOpRequestRef op)
   finish_contexts(g_ceph_context, waiting_for_active);
   if (is_readable())
     finish_contexts(g_ceph_context, waiting_for_readable);
-
-  lease->put();
 }
 
 void Paxos::handle_lease_ack(MonOpRequestRef op)
@@ -1145,8 +1126,6 @@ void Paxos::handle_lease_ack(MonOpRequestRef op)
   }
 
   warn_on_future_time(ack->sent_timestamp, ack->get_source());
-
-  ack->put();
 }
 
 void Paxos::lease_ack_timeout()
@@ -1374,7 +1353,6 @@ void Paxos::dispatch(MonOpRequestRef op)
   // election in progress?
   if (!mon->is_leader() && !mon->is_peon()) {
     dout(5) << "election in progress, dropping " << *m << dendl;
-    m->put();
     return;    
   }
 

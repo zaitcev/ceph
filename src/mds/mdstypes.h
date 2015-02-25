@@ -1388,6 +1388,8 @@ protected:
     f->dump_int("nref", ref);
   }
 
+  void dump(Formatter *f) const;
+
   // --------------------------------------------
   // auth pins
   virtual bool can_auth_pin() const = 0;

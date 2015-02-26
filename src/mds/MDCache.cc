@@ -3558,53 +3558,47 @@ bool MDCache::expire_recursive(
   dout(10) << __func__ << ":" << *in << dendl;
 
   mds_rank_t owner = subtree->dir_auth.first;
-  if (expiremap.count(owner) == 0)  {
-    expiremap[owner] = new MCacheExpire(mds->get_nodeid());
-  }
   MCacheExpire *expire_msg = expiremap[owner];
-
-  // Enumerate any dirfrags beneath this inode
-  list<CDir*> ls;
-  in->get_dirfrags(ls);
-  if (in->get_num_ref() > (int)ls.size()) {
-    dout(20) << __func__ << ": too many refs (" << in->get_num_ref()
-            << ")" << dendl;
-    return true;
-  }
+  assert(expire_msg);
 
   // Recurse into any dirfrags beneath this inode
+  list<CDir*> ls;
+  in->get_dirfrags(ls);
   list<CDir*>::iterator p = ls.begin();
   for (std::list<CDir*>::iterator p = ls.begin(); p != ls.end(); ++p) {
     CDir *subdir = *p;
 
-    dout(10) << " removing dirfrag " << subdir << dendl;
+    dout(10) << __func__ << ": entering dirfrag " << subdir << dendl;
     for (CDir::map_t::iterator q = subdir->items.begin();
          q != subdir->items.end(); ++q) {
       CDentry *dn = q->second;
       CDentry::linkage_t *dnl = dn->get_linkage();
       if (dnl->is_primary()) {
 	CInode *tin = dnl->get_inode();
+        dout(10) << __func__ << ": tin="
+          << *tin << dendl;
+
+        /* Remote strays with linkage (i.e. hardlinks) should not be
+         * expired, because they may be the target of
+         * a rename() as the owning MDS shuts down */
+        if (!tin->is_dir() && tin->inode.nlink) {
+          dout(10) << __func__ << ": child still has linkage" << dendl;
+          return true;
+        }
+
 	const bool abort = expire_recursive(tin, expiremap, subtree);
         if (abort) {
           return true;
         }
-	subdir->unlink_inode(dn);
-        remove_inode(tin);
       }
-
-      expire_msg->add_dentry(subtree->dirfrag(), subdir->dirfrag(), dn->name, dn->last, dn->get_replica_nonce());
-
-      subdir->remove_dentry(dn);
-      dn = NULL;
+      if (dn->lru_is_expireable()) {
+        trim_dentry(dn, expiremap);
+      } else {
+        dout(10) << __func__ << ": dn still has linkage " << *dn << dendl;
+        return true;
+      }
     }
-    expire_msg->add_dir(subtree->dirfrag(), subdir->dirfrag(), subdir->replica_nonce);
-    if (subdir->is_subtree_root()) {
-      remove_subtree(subdir);
-    }
-    in->close_dirfrag(subdir->dirfrag().frag);
   }
-
-  expire_msg->add_inode(subtree->dirfrag(), in->vino(), in->get_replica_nonce());
 
   return false;
 }
@@ -6236,9 +6230,25 @@ bool MDCache::trim(int max, int count)
       const MDSMap::mds_info_t &owner_info = mds->mdsmap->get_mds_info(owner);
       if (owner_info.state == MDSMap::STATE_STOPPING) {
         dout(20) << __func__ << ": it's stopping, remove it" << dendl;
-	const bool aborted = expire_recursive(subtree->inode, expiremap, subtree);
+        if (expiremap.count(owner) == 0)  {
+          expiremap[owner] = new MCacheExpire(mds->get_nodeid());
+        }
+
+	const bool aborted = expire_recursive(
+            subtree->inode, expiremap, subtree);
         if (!aborted) {
-          remove_inode(subtree->inode);
+          dout(20) << __func__ << ": successfully expired mdsdir" << dendl;
+          CInode *subtree_in = subtree->inode;
+          list<CDir*> ls;
+          subtree->inode->get_dirfrags(ls);
+          list<CDir*>::iterator p = ls.begin();
+          for (std::list<CDir*>::iterator p = ls.begin(); p != ls.end(); ++p) {
+            CDir *frag = *p;
+            trim_dirfrag(frag, subtree, expiremap);
+          }
+          trim_inode(NULL, subtree_in, NULL, expiremap);
+        } else {
+          dout(20) << __func__ << ": some unexpirable contents in mdsdir" << dendl;
         }
       } else {
         dout(20) << __func__ << ": not stopping, leaving it alone" << dendl;
@@ -6858,6 +6868,14 @@ void MDCache::handle_cache_expire(MCacheExpire *m)
 	assert(in);
       }        
       assert(in->is_auth());
+      dout(20) << __func__ << ": expiring inode " << *in << dendl;
+
+      if (in->replica_map.count(from) == 0) {
+        dout(20) << " in replicated=" << in->get_num_ref(MDSCacheObject::PIN_REPLICATED) << " replica_map size=" << in->replica_map.size() << dendl;
+        for (std::map<mds_rank_t,unsigned>::iterator i=in->replica_map.begin(); i != in->replica_map.end(); ++i) {
+          dout(20) << "  rep " << i->first << ":" << i->second << dendl;
+        }
+      }
       
       // check nonce
       if (nonce == in->get_replica_nonce(from)) {
@@ -6881,6 +6899,7 @@ void MDCache::handle_cache_expire(MCacheExpire *m)
 	 ++it) {
       CDir *dir = get_dirfrag(it->first);
       unsigned nonce = it->second;
+      dout(20) << __func__ << ": expiring dirfrag " << *dir << dendl;
       
       if (!dir) {
 	CInode *diri = get_inode(it->first.ino);
@@ -6896,6 +6915,11 @@ void MDCache::handle_cache_expire(MCacheExpire *m)
 	      dir = *q;
 	      if (dir->is_replica(from)) {
 		dout(7) << " dir expire on " << *dir << " from mds." << from << dendl;
+                dout(20) << " dir replicated=" << dir->get_num_ref(MDSCacheObject::PIN_REPLICATED) << " replica_map size=" << dir->replica_map.size() << dendl;
+                for (std::map<mds_rank_t,unsigned>::iterator i=dir->replica_map.begin(); i != dir->replica_map.end(); ++i) {
+                  dout(20) << "  rep " << i->first << ":" << i->second << dendl;
+                }
+                
 		dir->remove_replica(from);
 	      }
 	    }
@@ -6927,8 +6951,15 @@ void MDCache::handle_cache_expire(MCacheExpire *m)
 		<< " with old nonce " << nonce << " (current " << dir->get_replica_nonce(from)
 		<< "), dropping" << dendl;
       }
+
+      // Sanity on PIN_REPLICATED bit
+      if (dir->num_replicas() == 0) {
+        assert(dir->get_num_ref(MDSCacheObject::PIN_REPLICATED) == 0);
+      }
     }
     
+
+
     // DENTRIES
     for (map<dirfrag_t, map<pair<string,snapid_t>,uint32_t> >::iterator pd = p->second.dentries.begin();
 	 pd != p->second.dentries.end();

@@ -3587,15 +3587,10 @@ bool MDCache::expire_recursive(
         if (abort) {
           return true;
         }
-	subdir->unlink_inode(dn);
-        remove_inode(tin);
       }
-
-      expire_msg->add_dentry(subtree->dirfrag(), subdir->dirfrag(), dn->name, dn->last, dn->get_replica_nonce());
-
-      subdir->remove_dentry(dn);
-      dn = NULL;
+      trim_dentry(dn, expiremap);
     }
+
     expire_msg->add_dir(subtree->dirfrag(), subdir->dirfrag(), subdir->replica_nonce);
     if (subdir->is_subtree_root()) {
       remove_subtree(subdir);

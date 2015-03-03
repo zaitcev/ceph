@@ -1345,7 +1345,7 @@ void Server::handle_client_request(MClientRequest *req)
   if (req->get_oldest_client_tid() > 0) {
     dout(15) << " oldest_client_tid=" << req->get_oldest_client_tid() << dendl;
     assert(session);
-    session->trim_completed_requests(req->get_oldest_client_tid());
+    mds->sessionmap.trim_completed_requests(session, req->get_oldest_client_tid());
   }
 
   // register + dispatch

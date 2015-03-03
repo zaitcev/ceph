@@ -3816,5 +3816,37 @@ void CInode::dump(Formatter *f) const
   InodeStore::dump(f);
 
   MDSCacheObject::dump(f);
+
+  f->open_array_section("states");
+  MDSCacheObject::dump_states(f);
+  if (state_test(STATE_EXPORTING))
+    f->dump_string("state", "exporting");
+  if (state_test(STATE_OPENINGDIR))
+    f->dump_string("state", "openingdir");
+  if (state_test(STATE_FREEZING))
+    f->dump_string("state", "freezing");
+  if (state_test(STATE_FROZEN))
+    f->dump_string("state", "frozen");
+  if (state_test(STATE_AMBIGUOUSAUTH))
+    f->dump_string("state", "ambiguousauth");
+  if (state_test(STATE_EXPORTINGCAPS))
+    f->dump_string("state", "exportingcaps");
+  if (state_test(STATE_NEEDSRECOVER))
+    f->dump_string("state", "needsrecover");
+  if (state_test(STATE_PURGING))
+    f->dump_string("state", "purging");
+  if (state_test(STATE_DIRTYPARENT))
+    f->dump_string("state", "dirtyparent");
+  if (state_test(STATE_DIRTYRSTAT))
+    f->dump_string("state", "dirtyrstat");
+  if (state_test(STATE_STRAYPINNED))
+    f->dump_string("state", "straypinned");
+  if (state_test(STATE_FROZENAUTHPIN))
+    f->dump_string("state", "frozenauthpin");
+  if (state_test(STATE_DIRTYPOOL))
+    f->dump_string("state", "dirtypool");
+  if (state_test(STATE_ORPHAN))
+    f->dump_string("state", "orphan");
+  f->close_section();
 }
 

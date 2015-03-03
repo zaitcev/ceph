@@ -1026,6 +1026,25 @@ void MDSCacheObject::dump(Formatter *f) const
   f->dump_int("auth_pins", auth_pins);
   f->dump_int("nested_auth_pins", nested_auth_pins);
 
-  dump_pin_set(f);
+  f->dump_bool("is_frozen", is_frozen());
+  f->dump_bool("is_freezing", is_freezing());
+
+#ifdef MDS_REF_SET
+    f->open_object_section("pins");
+    for(std::map<int, int>::const_iterator it = ref_map.begin();
+        it != ref_map.end(); ++it) {
+      f->dump_int(pin_name(it->first), it->second);
+    }
+    f->close_section();
+#endif
+    f->dump_int("nref", ref);
 }
 
+/*
+ * Use this in subclasses when printing their specialized
+ * states too.
+ */
+void MDSCacheObject::dump_states(Formatter *f) const
+{
+  if (state_test(STATE_AUTH)) f->dump_string("state", "complete");
+}

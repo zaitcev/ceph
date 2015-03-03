@@ -592,6 +592,20 @@ void CDentry::dump(Formatter *f) const
   f->open_object_section("versionlock");
   versionlock.dump(f);
   f->close_section();
+
+  f->open_array_section("states");
+  MDSCacheObject::dump_states(f);
+  if (state_test(STATE_NEW))
+    f->dump_string("state", "new");
+  if (state_test(STATE_FRAGMENTING))
+    f->dump_string("state", "fragmenting");
+  if (state_test(STATE_PURGING))
+    f->dump_string("state", "purging");
+  if (state_test(STATE_BADREMOTEINO))
+    f->dump_string("state", "badremoteino");
+  if (state_test(STATE_STRAY))
+    f->dump_string("state", "stray");
+  f->close_section();
 }
 
 std::string CDentry::linkage_t::get_remote_d_type_string() const

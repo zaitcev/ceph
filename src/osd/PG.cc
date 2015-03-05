@@ -2879,7 +2879,7 @@ void PG::trim_peers()
   }
 }
 
-void PG::add_log_entry(const pg_log_entry_t& e, bufferlist& log_bl)
+void PG::add_log_entry(const pg_log_entry_t& e)
 {
   // raise last_complete only if we were previously up to date
   if (info.last_complete == info.last_update)
@@ -2897,8 +2897,6 @@ void PG::add_log_entry(const pg_log_entry_t& e, bufferlist& log_bl)
   // log mutation
   pg_log.add(e);
   dout(10) << "add_log_entry " << e << dendl;
-
-  e.encode_with_checksum(log_bl);
 }
 
 
@@ -2913,7 +2911,6 @@ void PG::append_log(
     update_snap_map(logv, t);
   dout(10) << "append_log " << pg_log.get_log() << " " << logv << dendl;
 
-  map<string,bufferlist> keys;
   for (vector<pg_log_entry_t>::const_iterator p = logv.begin();
        p != logv.end();
        ++p) {
@@ -2943,7 +2940,7 @@ void PG::append_log(
 		 << dendl;
       }
     }
-    add_log_entry(*p, keys[p->get_key_name()]);
+    add_log_entry(*p);
   }
 
   PGLogEntryHandler handler;
@@ -2964,9 +2961,6 @@ void PG::append_log(
 	get_osdmap()->get_epoch(),
 	trim_rollback_to));
   }
-
-  dout(10) << "append_log  adding " << keys.size() << " keys" << dendl;
-  t.omap_setkeys(coll, pgmeta_oid, keys);
 
   pg_log.trim(&handler, trim_to, info);
 

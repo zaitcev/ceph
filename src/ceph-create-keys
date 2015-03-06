@@ -221,6 +221,10 @@ def main():
         cluster=args.cluster,
         type_='mds',
         )
+    bootstrap_key(
+        cluster=args.cluster,
+        type_='rgw',
+        )
 
 
 if __name__ == '__main__':

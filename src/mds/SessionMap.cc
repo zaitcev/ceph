@@ -39,16 +39,7 @@ class SessionMapIOContext : public MDSIOContextBase
     }
 };
 
-class SessionMapContext : public MDSInternalContextBase
-{
-  protected:
-    SessionMap *sessionmap;
-    MDS *get_mds() {return sessionmap->mds;}
-  public:
-    SessionMapContext(SessionMap *sessionmap_) : sessionmap(sessionmap_) {
-      assert(sessionmap != NULL);
-    }
-};
+
 
 void SessionMap::dump()
 {
@@ -569,11 +560,11 @@ void SessionMap::remove_session(Session *s)
   s->trim_completed_requests(0);
   s->item_session_list.remove_myself();
   session_map.erase(s->info.inst.name);
+  s->put();
   if (dirty_sessions.count(s->info.inst.name)) {
     dirty_sessions.erase(s->info.inst.name);
   }
   null_sessions.insert(s->info.inst.name);
-  s->put();
 }
 
 void SessionMap::touch_session(Session *session)
@@ -681,154 +672,6 @@ void SessionMap::_mark_dirty(Session *s)
   dirty_sessions.insert(s->info.inst.name);
 }
 
-
-/**
- * Used to mark_dirty a set of sessions, once a particular
- * earlier version of the map has been persisted.
- */
-class DirtyOnVersion : public SessionMapContext
-{
-  std::list<Session*> projected_sessions;
-  MDSInternalContextBase *on_saved;
-public:
-  DirtyOnVersion(SessionMap *s, std::list<Session*> ps, MDSInternalContextBase *os)
-    : SessionMapContext(s), projected_sessions(ps), on_saved(os)
-  {}
-
-  void finish(int r)
-  {
-    sessionmap->_finish_dirty_and_save(projected_sessions, on_saved);
-  }
-};
-
-
-/*
- * We have to be a bit clever here, because in the case where
- * nothing is projected, we can immediately mark lots of sessions
- * dirty, and issue save()s in the process to break them up
- * into multiple OMAP updates.
- *
- * However, when something *is* projected, we have to insert our
- * updates *after* the projected version lands in order to preserve
- * the correct ordering.
- */
-void SessionMap::dirty_and_save(
-    std::set<entity_name_t> sessions,
-    MDSInternalContextBase *on_saved)
-{
-  dout(20) << __func__ << ": on " << sessions.size() << " sessions at "
-           << "v="<< version << " pv=" << projected << dendl;
-
-  assert(!sessions.empty());  // we don't handle this case, caller must
-
-  const version_t original_projected = projected;
-  version_t needed_version = 0;
-
-  std::list<Session*> projected_sessions;
-  for (std::set<entity_name_t>::iterator i = sessions.begin();
-       i != sessions.end(); ++i) {
-    Session *session = mds->sessionmap.get_session(*i);
-
-    /*
-     * XXX ideally tag sessions with which sessionmap versions
-     * completed_requests was modified in, vs which version the
-     * session was last dirtied in.
-     */
-    if (session) {
-      // Three cases:
-      //  * session is projected, we must wait for its projected
-      //    version to be committed (and ensure it is given a
-      //    save() kick when it does its dirtying)
-      //  * session is dirty, we must give it a save kick
-      //    and wait for `version`
-      //  * session is clean and unprojected: we must project it.
-
-      if (dirty_sessions.count(session->info.inst.name)
-          || null_sessions.count(session->info.inst.name)) {
-        needed_version = MAX(needed_version, version);
-      } else if (!session->projected.empty()) {
-        needed_version = MAX(needed_version, session->projected.back());
-        // This will get save() kicked by DirtyOnVersion, which will
-        // execute at some point >= the session's projected version
-        // by virtue of waiting until the current value of `projected`
-      } else {
-        mark_projected(session);
-        projected_sessions.push_back(session);
-        needed_version = session->projected.back();
-      }
-    }
-  }
-
-  if (needed_version == 0) {
-    dout(20) << __func__ << ": not waiting for anything, complete immediately"
-             << dendl;
-    on_saved->complete(0);
-    return;
-  }
-
-  // We might be waiting for:
-  //  Case A: A version that's currently dirty (i.e. `version`)
-  //  Case B: A projected version ahead of original_projected (we have some
-  //    mark_dirty'ing of our own to do)
-  //  Case C: A projected version <= original_projected (we just need
-  //    to wait for that version's mark_dirty and call save())
-  //
-  //
-
-  if (needed_version == version) {
-    // Case A
-    dout(20) << __func__ << ": just need to wait for current version to save"
-             << dendl;
-    save(on_saved);
-    return;
-  }
-
-  if (projected_sessions.empty() and needed_version > version) {
-    // If we're not projecting anything ourselves, we'll need
-    // to kick a save() after the already-projected sessions
-    // reach their mark_dirty.
-
-  } else if (projected_sessions.empty() and needed_version == version) {
-    // If we're not projecting anything ourselves, and we're only
-    // waiting for the current version to be saved.  Simply calling
-    // save() will be sufficient.
-  }
-
-  DirtyOnVersion *ds = new DirtyOnVersion(this, projected_sessions, on_saved);
-
-  if (original_projected != version) {
-    // Something was projected before us, wait for it to be dirtied
-    // before we do our dirtying.
-    assert(projected > version);
-
-    dout(20) << __func__ << ": waiting for version " << original_projected
-             << " to finish flushing" << dendl;
-    // Now bide our time until the projected versions get their corresponding
-    // mark_dirty calls, at which point we can mark_dirty our own sessions.
-    dirty_waiters[original_projected].push_back(ds);
-  } else {
-    // Nothing but our stuff is projected, go ahead and dirty it right away
-    assert(original_projected == version);
-
-    dout(20) << __func__ << ": nothing projected, flushing now" << dendl;
-
-    ds->complete(0);
-    ds = NULL;
-  }
-}
-
-void SessionMap::_finish_dirty_and_save(
-    std::list<Session*> projected_sessions,
-    MDSInternalContextBase *on_saved)
-{
-  for (std::list<Session*>::iterator i = projected_sessions.begin();
-       i != projected_sessions.end(); ++i) {
-    mark_dirty(*i);
-  }
-
-  save(on_saved);
-}
-
 void SessionMap::mark_dirty(Session *s)
 {
   dout(20) << __func__ << " s=" << s << " name=" << s->info.inst.name
@@ -837,9 +680,6 @@ void SessionMap::mark_dirty(Session *s)
   _mark_dirty(s);
   version++;
   s->pop_pv(version);
-
-  finish_contexts(g_ceph_context, dirty_waiters[version]);
-  dirty_waiters.erase(version);
 }
 
 void SessionMap::replay_dirty_session(Session *s)
@@ -865,13 +705,5 @@ version_t SessionMap::mark_projected(Session *s)
   ++projected;
   s->push_pv(projected);
   return projected;
-}
-
-void SessionMap::trim_completed_requests(Session *session, ceph_tid_t tid) {
-  if (session->trim_completed_requests(tid)) {
-    //mark_dirty(session);
-    // XXX should be marking the version down so that we can
-    // handle the dirtying at log segment expiry instead
-  }
 }
 

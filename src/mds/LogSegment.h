@@ -94,16 +94,6 @@ class LogSegment {
     slave_updates(0), // passed to begin() manually
     inotablev(0), sessionmapv(0)
   { }
-
- protected:
-  std::set<entity_name_t> touched_sessions;
- public:
-  void add_touched_session(entity_name_t e)
-  {
-    if (touched_sessions.find(e) == touched_sessions.end()) {
-      touched_sessions.insert(e);
-    }
-  }
 };
 
 #endif

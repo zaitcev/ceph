@@ -237,18 +237,6 @@ void LogSegment::try_to_expire(MDS *mds, MDSGatherBuilder &gather_bld, int op_pr
     mds->sessionmap.save(gather_bld.new_sub(), sessionmapv);
   }
 
-  // Client sessions
-  if (!touched_sessions.empty()) {
-    mds->sessionmap.dirty_and_save(touched_sessions, gather_bld.new_sub());
-    touched_sessions.clear();  // Avoid dirtying again if retrying
-  }
-  /*
-   * FIXME: be less blunt here:
-   *  * If we already dirtied a given session between its EMetaBlob
-   *    insertion in this segment, and the segment's expiry, then
-   *    we really don't need to dirty it again.
-   */
-
   // pending commit atids
   for (map<int, ceph::unordered_set<version_t> >::iterator p = pending_commit_tids.begin();
        p != pending_commit_tids.end();
@@ -404,15 +392,6 @@ void EMetaBlob::update_segment(LogSegment *ls)
   //  note the newest request per client
   //if (!client_reqs.empty())
     //    ls->last_client_tid[client_reqs.rbegin()->client] = client_reqs.rbegin()->tid);
-
-  //XXX I get called again during try_to_expire so handle that
-  //case
-  for (list<pair<metareqid_t, uint64_t> >::iterator p = client_reqs.begin();
-       p != client_reqs.end(); ++p) {
-    if (p->first.name.is_client()) {
-      ls->add_touched_session(p->first.name);
-    }
-  }
 }
 
 // EMetaBlob::fullbit
@@ -1615,13 +1594,11 @@ void EMetaBlob::replay(MDS *mds, LogSegment *logseg, MDSlaveUpdate *slaveup)
       Session *session = mds->sessionmap.get_session(p->first.name);
       if (session) {
 	session->add_completed_request(p->first.tid, created);
-	if (p->second) {
-          mds->sessionmap.trim_completed_requests(session, p->second);
-        }
+	if (p->second)
+	  session->trim_completed_requests(p->second);
       }
     }
   }
-
 
   // update segment
   update_segment(logseg);

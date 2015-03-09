@@ -625,7 +625,7 @@ struct ObjectOperation {
     uint32_t *out_flags;
     uint32_t *out_data_digest;
     uint32_t *out_omap_digest;
-    vector<osd_reqid_t> *out_reqids;
+    vector<pair<osd_reqid_t, version_t> > *out_reqids;
     int *prval;
     C_ObjectOperation_copyget(object_copy_cursor_t *c,
 			      uint64_t *s,
@@ -638,7 +638,7 @@ struct ObjectOperation {
 			      uint32_t *flags,
 			      uint32_t *dd,
 			      uint32_t *od,
-			      vector<osd_reqid_t> *oreqids,
+			      vector<pair<osd_reqid_t, version_t> > *oreqids,
 			      int *r)
       : cursor(c),
 	out_size(s), out_mtime(m),
@@ -698,7 +698,7 @@ struct ObjectOperation {
 		uint32_t *out_flags,
 		uint32_t *out_data_digest,
 		uint32_t *out_omap_digest,
-		vector<osd_reqid_t> *out_reqids,
+		vector<pair<osd_reqid_t, version_t> > *out_reqids,
 		int *prval) {
     OSDOp& osd_op = add_op(CEPH_OSD_OP_COPY_GET);
     osd_op.op.copy_get.max = max;
@@ -1146,6 +1146,7 @@ public:
     op_target_t target;
 
     ConnectionRef con;  // for rx buffer only
+    uint64_t features;  // explicitly specified op features
 
     vector<OSDOp> ops;
 
@@ -1160,6 +1161,7 @@ public:
 
     int priority;
     Context *onack, *oncommit, *ontimeout;
+    Context *oncommit_sync;         // used internally by watch/notify
 
     ceph_tid_t tid;
     eversion_t replay_version;        // for op replay
@@ -1189,12 +1191,18 @@ public:
       session(NULL), incarnation(0),
       target(o, ol, f),
       con(NULL),
+      features(CEPH_FEATURES_SUPPORTED_DEFAULT),
       snapid(CEPH_NOSNAP),
       outbl(NULL),
-      priority(0), onack(ac), oncommit(co),
+      priority(0),
+      onack(ac),
+      oncommit(co),
       ontimeout(NULL),
-      tid(0), attempts(0),
-      objver(ov), reply_epoch(NULL),
+      oncommit_sync(NULL),
+      tid(0),
+      attempts(0),
+      objver(ov),
+      reply_epoch(NULL),
       map_dne_bound(0),
       budgeted(false),
       should_resend(true),
@@ -1520,7 +1528,7 @@ public:
     uint32_t register_gen;
     bool registered;
     bool canceled;
-    Context *on_reg_ack, *on_reg_commit;
+    Context *on_reg_commit;
 
     // we trigger these from an async finisher
     Context *on_notify_finish;
@@ -1554,7 +1562,7 @@ public:
 		 register_gen(0),
 		 registered(false),
 		 canceled(false),
-		 on_reg_ack(NULL), on_reg_commit(NULL),
+		 on_reg_commit(NULL),
 		 on_notify_finish(NULL),
 		 notify_result_bl(NULL),
 		 watch_context(NULL),
@@ -1577,20 +1585,6 @@ public:
     }
   };
 
-  struct C_Linger_Register : public Context {
-    Objecter *objecter;
-    LingerOp *info;
-    C_Linger_Register(Objecter *o, LingerOp *l) : objecter(o), info(l) {
-      info->get();
-    }
-    ~C_Linger_Register() {
-      info->put();
-    }
-    void finish(int r) {
-      objecter->_linger_register(info, r);
-    }
-  };
-  
   struct C_Linger_Commit : public Context {
     Objecter *objecter;
     LingerOp *info;
@@ -1741,14 +1735,11 @@ public:
   void _session_command_op_assign(OSDSession *to, CommandOp *op);
   void _session_command_op_remove(OSDSession *from, CommandOp *op);
 
-  int _get_osd_session(int osd, RWLock::Context& lc, OSDSession **psession);
   int _assign_op_target_session(Op *op, RWLock::Context& lc, bool src_session_locked, bool dst_session_locked);
-  int _get_op_target_session(Op *op, RWLock::Context& lc, OSDSession **psession);
   int _recalc_linger_op_target(LingerOp *op, RWLock::Context& lc);
 
   void _linger_submit(LingerOp *info);
   void _send_linger(LingerOp *info);
-  void _linger_register(LingerOp *info, int r);
   void _linger_commit(LingerOp *info, int r);
   void _linger_reconnect(LingerOp *info, int r);
   void _send_linger_ping(LingerOp *info);
@@ -1930,7 +1921,6 @@ private:
   int pool_snap_get_info(int64_t poolid, snapid_t snap, pool_snap_info_t *info);
   int pool_snap_list(int64_t poolid, vector<uint64_t> *snaps);
 private:
-  bool _promote_lock_check_race(RWLock::Context& lc);
 
   // low-level
   ceph_tid_t _op_submit(Op *op, RWLock::Context& lc);
@@ -2050,10 +2040,13 @@ public:
     return o;
   }
   ceph_tid_t read(const object_t& oid, const object_locator_t& oloc,
-	     ObjectOperation& op,
-	     snapid_t snapid, bufferlist *pbl, int flags,
-	     Context *onack, version_t *objver = NULL, int *data_offset = NULL) {
+		  ObjectOperation& op,
+		  snapid_t snapid, bufferlist *pbl, int flags,
+		  Context *onack, version_t *objver = NULL, int *data_offset = NULL,
+		  uint64_t features = 0) {
     Op *o = prepare_read_op(oid, oloc, op, snapid, pbl, flags, onack, objver, data_offset);
+    if (features)
+      o->features = features;
     return op_submit(o);
   }
   ceph_tid_t pg_read(uint32_t hash, object_locator_t oloc,

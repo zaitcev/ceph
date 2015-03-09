@@ -97,12 +97,18 @@ const string Monitor::MONITOR_STORE_PREFIX = "monitor_store";
 
 
 #undef COMMAND
+#undef COMMAND_WITH_FLAG
 MonCommand mon_commands[] = {
-#define COMMAND(parsesig, helptext, modulename, req_perms, avail) \
-  {parsesig, helptext, modulename, req_perms, avail},
+#define COMMAND(parsesig, helptext, modulename, req_perms, avail)	\
+  {parsesig, helptext, modulename, req_perms, avail, 0},
+#define COMMAND_WITH_FLAG(parsesig, helptext, modulename, req_perms, avail, flag) \
+  {parsesig, helptext, modulename, req_perms, avail, MonCommand::FLAG_##flag},
 #include <mon/MonCommands.h>
 };
+#undef COMMAND
 MonCommand classic_mon_commands[] = {
+#define COMMAND(parsesig, helptext, modulename, req_perms, avail)	\
+  {parsesig, helptext, modulename, req_perms, avail},
 #include <mon/DumplingMonCommands.h>
 };
 
@@ -431,6 +437,7 @@ void Monitor::write_features(MonitorDBStore::TransactionRef t)
 const char** Monitor::get_tracked_conf_keys() const
 {
   static const char* KEYS[] = {
+    "crushtool", // helpful for testing
     "mon_lease",
     "mon_lease_renew_interval",
     "mon_lease_ack_timeout",
@@ -2430,7 +2437,7 @@ const MonCommand *Monitor::_get_moncommand(const string &cmd_prefix,
   MonCommand *this_cmd = NULL;
   for (MonCommand *cp = cmds;
        cp < &cmds[cmds_size]; cp++) {
-    if (cp->cmdstring.find(cmd_prefix) != string::npos) {
+    if (cp->cmdstring.compare(0, cmd_prefix.size(), cmd_prefix) == 0) {
       this_cmd = cp;
       break;
     }
@@ -2447,7 +2454,7 @@ bool Monitor::_allowed_command(MonSession *s, string &module, string &prefix,
   bool cmd_w = this_cmd->requires_perm('w');
   bool cmd_x = this_cmd->requires_perm('x');
 
-  bool capable = s->caps.is_capable(g_ceph_context, s->inst.name,
+  bool capable = s->caps.is_capable(g_ceph_context, s->entity_name,
                                     module, prefix, param_str_map,
                                     cmd_r, cmd_w, cmd_x);
 
@@ -2588,16 +2595,41 @@ void Monitor::handle_command(MMonCommand *m)
     reply_command(m, -EINVAL, "command not known", 0);
     return;
   }
-  // validate command is in our map & matches, or forward
+  // validate command is in our map & matches, or forward if it is allowed
   const MonCommand *mon_cmd = _get_moncommand(prefix, mon_commands,
                                               ARRAY_SIZE(mon_commands));
-  if (!is_leader() && (!mon_cmd ||
-      (*leader_cmd != *mon_cmd))) {
-    dout(10) << "We don't match leader, forwarding request " << m << dendl;
-    forward_request_leader(m);
+  if (!is_leader()) {
+    if (!mon_cmd) {
+      if (leader_cmd->has_flag(MonCommand::FLAG_NOFORWARD)) {
+	reply_command(m, -EINVAL,
+		      "command not locally supported and not allowed to forward",
+		      0);
+	return;
+      }
+      dout(10) << "Command not locally supported, forwarding request "
+	       << m << dendl;
+      forward_request_leader(m);
+      return;
+    } else if (!mon_cmd->is_compat(leader_cmd)) {
+      if (mon_cmd->has_flag(MonCommand::FLAG_NOFORWARD)) {
+	reply_command(m, -EINVAL,
+		      "command not compatible with leader and not allowed to forward",
+		      0);
+	return;
+      }
+      dout(10) << "Command not compatible with leader, forwarding request "
+	       << m << dendl;
+      forward_request_leader(m);
+      return;
+    }
+  }
+
+  if (session->proxy_con && mon_cmd->has_flag(MonCommand::FLAG_NOFORWARD)) {
+    dout(10) << "Got forward for noforward command " << m << dendl;
+    reply_command(m, -EINVAL, "forward for noforward command", rdata, 0);
     return;
   }
-  
+
   /* what we perceive as being the service the command falls under */
   string service(mon_cmd->module);
 
@@ -2937,7 +2969,8 @@ void Monitor::forward_request_leader(PaxosServiceMessage *req)
     routed_requests[rr->tid] = rr;
     session->routed_request_tids.insert(rr->tid);
     
-    dout(10) << "forward_request " << rr->tid << " request " << *req << dendl;
+    dout(10) << "forward_request " << rr->tid << " request " << *req
+	     << " features " << rr->con_features << dendl;
 
     MForward *forward = new MForward(rr->tid, req,
 				     rr->con_features,
@@ -3635,7 +3668,7 @@ void Monitor::timecheck_start_round()
     dout(10) << __func__ << " there's a timecheck going on" << dendl;
     utime_t curr_time = ceph_clock_now(g_ceph_context);
     double max = g_conf->mon_timecheck_interval*3;
-    if (curr_time - timecheck_round_start > max) {
+    if (curr_time - timecheck_round_start < max) {
       dout(10) << __func__ << " keep current round going" << dendl;
       goto out;
     } else {

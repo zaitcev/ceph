@@ -266,6 +266,12 @@ void ReplicatedPG::on_local_recover(
     assert(obc);
     obc->obs.exists = true;
     obc->ondisk_write_lock();
+
+    bool got = obc->get_recovery_read();
+    assert(got);
+
+    assert(recovering.count(obc->obs.oi.soid));
+    recovering[obc->obs.oi.soid] = obc;
     obc->obs.oi = recovery_info.oi;  // may have been updated above
 
 
@@ -311,12 +317,17 @@ void ReplicatedPG::on_global_recover(
   dout(10) << "pushed " << soid << " to all replicas" << dendl;
   map<hobject_t, ObjectContextRef>::iterator i = recovering.find(soid);
   assert(i != recovering.end());
-  if (backfills_in_flight.count(soid)) {
-    list<OpRequestRef> requeue_list;
-    i->second->drop_backfill_read(&requeue_list);
-    requeue_ops(requeue_list);
+
+  // recover missing won't have had an obc, but it gets filled in
+  // during on_local_recover
+  assert(i->second);
+  list<OpRequestRef> requeue_list;
+  i->second->drop_recovery_read(&requeue_list);
+  requeue_ops(requeue_list);
+
+  if (backfills_in_flight.count(soid))
     backfills_in_flight.erase(soid);
-  }
+
   recovering.erase(i);
   finish_recovery_op(soid);
   if (waiting_for_degraded_object.count(soid)) {
@@ -412,7 +423,11 @@ void ReplicatedPG::wait_for_unreadable_object(
   } else {
     dout(7) << "missing " << soid << " v " << v << ", recovering." << dendl;
     PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
-    recover_missing(soid, v, cct->_conf->osd_client_op_priority, h);
+    if (is_missing_object(soid)) {
+      recover_missing(soid, v, cct->_conf->osd_client_op_priority, h);
+    } else {
+      prep_object_replica_pushes(soid, v, h);
+    }
     pgbackend->run_recovery_op(h, cct->_conf->osd_client_op_priority);
   }
   waiting_for_unreadable_object[soid].push_back(op);
@@ -425,7 +440,37 @@ void ReplicatedPG::wait_for_all_missing(OpRequestRef op)
   op->mark_delayed("waiting for all missing");
 }
 
-bool ReplicatedPG::is_degraded_object(const hobject_t& soid)
+bool ReplicatedPG::is_degraded_object(const hobject_t &soid, int *healthy_copies)
+{
+  bool degraded = false;
+  assert(healthy_copies);
+  *healthy_copies = 0;
+
+  if (pg_log.get_missing().missing.count(soid)) {
+    degraded = true;
+  } else {
+    *healthy_copies += 1;
+  }
+
+  for (set<pg_shard_t>::iterator i = actingbackfill.begin();
+       i != actingbackfill.end();
+       ++i) {
+    if (*i == get_primary()) continue;
+    pg_shard_t peer = *i;
+    if (peer_missing.count(peer) &&
+        peer_missing[peer].missing.count(soid)) {
+      degraded = true;
+      continue;
+    }
+
+    assert(peer_info.count(peer));
+    if (!peer_info[peer].is_incomplete())
+      *healthy_copies += 1;
+  }
+  return degraded;
+}
+
+bool ReplicatedPG::is_degraded_or_backfilling_object(const hobject_t& soid)
 {
   if (pg_log.get_missing().missing.count(soid))
     return true;
@@ -452,7 +497,7 @@ bool ReplicatedPG::is_degraded_object(const hobject_t& soid)
 
 void ReplicatedPG::wait_for_degraded_object(const hobject_t& soid, OpRequestRef op)
 {
-  assert(is_degraded_object(soid));
+  assert(is_degraded_or_backfilling_object(soid));
 
   // we don't have it (yet).
   if (recovering.count(soid)) {
@@ -1268,30 +1313,33 @@ void ReplicatedPG::do_request(
     dout(20) << flushes_in_progress
 	     << " flushes_in_progress pending "
 	     << "waiting for active on " << op << dendl;
-    waiting_for_active.push_back(op);
-    op->mark_delayed("waiting for flushes");
+    waiting_for_peered.push_back(op);
     return;
   }
 
-  if (!is_active()) {
+  if (!is_peered()) {
     // Delay unless PGBackend says it's ok
     if (pgbackend->can_handle_while_inactive(op)) {
       bool handled = pgbackend->handle_message(op);
       assert(handled);
       return;
     } else {
-      waiting_for_active.push_back(op);
-      op->mark_delayed("waiting for active");
+      waiting_for_peered.push_back(op);
       return;
     }
   }
 
-  assert(is_active() && flushes_in_progress == 0);
+  assert(is_peered() && flushes_in_progress == 0);
   if (pgbackend->handle_message(op))
     return;
 
   switch (op->get_req()->get_type()) {
   case CEPH_MSG_OSD_OP:
+    if (!is_active()) {
+      dout(20) << " peered, not active, waiting for active on " << op << dendl;
+      waiting_for_active.push_back(op);
+      return;
+    }
     if (is_replay()) {
       dout(20) << " replay, waiting for active on " << op << dendl;
       waiting_for_active.push_back(op);
@@ -1423,7 +1471,26 @@ void ReplicatedPG::do_op(OpRequestRef& op)
   }
 
   // degraded object?
-  if (write_ordered && is_degraded_object(head)) {
+  
+  /* We continue to block writes on degraded objects for an EC pools because
+   * we have to reset can_rollback_to when we get a repop without the
+   * transaction.  If two replicas do that on sequential ops on different
+   * objects and then crash, other unstable objects before those two would
+   * also be unable to be rolled back, and would also wind up unfound.
+   * We can enable degraded writes on ec pools by blocking such a write
+   * to a peer until all previous writes have completed.  For now, we
+   * will simply block them.
+   *
+   * We also block if our peers do not support DEGRADED_WRITES.
+   */
+  int valid_copies = 0;
+  if (write_ordered &&
+      is_degraded_object(head, &valid_copies) &&
+      (valid_copies < pool.info.min_size ||
+       waiting_for_degraded_object.count(head) ||
+       pool.info.ec_pool() ||
+       !cct->_conf->osd_enable_degraded_writes ||
+       !(get_min_peer_features() & CEPH_FEATURE_OSD_DEGRADED_WRITES))) {
     wait_for_degraded_object(head, op);
     return;
   }
@@ -1438,7 +1505,7 @@ void ReplicatedPG::do_op(OpRequestRef& op)
   }
 
   // degraded object?
-  if (write_ordered && is_degraded_object(snapdir)) {
+  if (write_ordered && is_degraded_or_backfilling_object(snapdir)) {
     wait_for_degraded_object(snapdir, op);
     return;
   }
@@ -1456,27 +1523,30 @@ void ReplicatedPG::do_op(OpRequestRef& op)
     // promote ops, but we can't possible have both in our log where
     // the original request is still not stable on disk, so for our
     // purposes here it doesn't matter which one we get.
-    const pg_log_entry_t *entry = pg_log.get_log().get_request(m->get_reqid());
-    if (entry) {
-      const eversion_t& oldv = entry->version;
+    eversion_t replay_version;
+    version_t user_version;
+    bool got = pg_log.get_log().get_request(
+      m->get_reqid(), &replay_version, &user_version);
+    if (got) {
       dout(3) << __func__ << " dup " << m->get_reqid()
-	      << " was " << oldv << dendl;
-      if (already_complete(oldv)) {
-	osd->reply_op_error(op, 0, oldv, entry->user_version);
+	      << " was " << replay_version << dendl;
+      if (already_complete(replay_version)) {
+	osd->reply_op_error(op, 0, replay_version, user_version);
       } else {
 	if (m->wants_ack()) {
-	  if (already_ack(oldv)) {
+	  if (already_ack(replay_version)) {
 	    MOSDOpReply *reply = new MOSDOpReply(m, 0, get_osdmap()->get_epoch(), 0, false);
 	    reply->add_flags(CEPH_OSD_FLAG_ACK);
-	    reply->set_reply_versions(oldv, entry->user_version);
+	    reply->set_reply_versions(replay_version, user_version);
 	    osd->send_message_osd_client(reply, m->get_connection());
 	  } else {
-	    dout(10) << " waiting for " << oldv << " to ack" << dendl;
-	    waiting_for_ack[oldv].push_back(op);
+	    dout(10) << " waiting for " << replay_version << " to ack" << dendl;
+	    waiting_for_ack[replay_version].push_back(make_pair(op, user_version));
 	  }
 	}
-	dout(10) << " waiting for " << oldv << " to commit" << dendl;
-	waiting_for_ondisk[oldv].push_back(op);  // always queue ondisk waiters, so that we can requeue if needed
+	dout(10) << " waiting for " << replay_version << " to commit" << dendl;
+        // always queue ondisk waiters, so that we can requeue if needed
+	waiting_for_ondisk[replay_version].push_back(make_pair(op, user_version));
 	op->mark_delayed("waiting for ondisk");
       }
       return;
@@ -1527,7 +1597,7 @@ void ReplicatedPG::do_op(OpRequestRef& op)
     // degraded object?  (the check above was for head; this could be a clone)
     if (write_ordered &&
 	obc->obs.oi.soid.snap != CEPH_NOSNAP &&
-	is_degraded_object(obc->obs.oi.soid)) {
+	is_degraded_or_backfilling_object(obc->obs.oi.soid)) {
       dout(10) << __func__ << ": clone " << obc->obs.oi.soid
 	       << " is degraded, waiting" << dendl;
       wait_for_degraded_object(obc->obs.oi.soid, op);
@@ -1554,7 +1624,8 @@ void ReplicatedPG::do_op(OpRequestRef& op)
       maybe_handle_cache(op, write_ordered, obc, r, missing_oid, false, in_hit_set))
     return;
 
-  if (r) {
+  if (r && (r != -ENOENT || !obc)) {
+    dout(20) << __func__ << "find_object_context got error " << r << dendl;
     osd->reply_op_error(op, r);
     return;
   }
@@ -1630,9 +1701,9 @@ void ReplicatedPG::do_op(OpRequestRef& op)
 	    dout(1) << " src_oid " << sobc->obs.oi.soid << " != "
 		  << obc->obs.oi.soid << dendl;
 	    osd->reply_op_error(op, -EINVAL);
-	  } else if (is_degraded_object(sobc->obs.oi.soid) ||
+	  } else if (is_degraded_or_backfilling_object(sobc->obs.oi.soid) ||
 		   (check_src_targ(sobc->obs.oi.soid, obc->obs.oi.soid))) {
-	    if (is_degraded_object(sobc->obs.oi.soid)) {
+	    if (is_degraded_or_backfilling_object(sobc->obs.oi.soid)) {
 	      wait_for_degraded_object(sobc->obs.oi.soid, op);
 	    } else {
 	      waiting_for_degraded_object[sobc->obs.oi.soid].push_back(op);
@@ -1697,6 +1768,14 @@ void ReplicatedPG::do_op(OpRequestRef& op)
   if (!obc->obs.exists)
     ctx->snapset_obc = get_object_context(obc->obs.oi.soid.get_snapdir(), false);
 
+  /* Due to obc caching, we might have a cached non-existent snapset_obc
+   * for the snapdir.  If so, we can ignore it.  Subsequent parts of the
+   * do_op pipeline make decisions based on whether snapset_obc is
+   * populated.
+   */
+  if (ctx->snapset_obc && !ctx->snapset_obc->obs.exists)
+    ctx->snapset_obc = ObjectContextRef();
+
   if (m->get_flags() & CEPH_OSD_FLAG_SKIPRWLOCKS) {
     dout(20) << __func__ << ": skipping rw locks" << dendl;
   } else if (m->get_flags() & CEPH_OSD_FLAG_FLUSH) {
@@ -1710,10 +1789,17 @@ void ReplicatedPG::do_op(OpRequestRef& op)
       reply_ctx(ctx, -EINVAL);
       return;
     }
-  } else if (!get_rw_locks(ctx)) {
+  } else if (!get_rw_locks(write_ordered, ctx)) {
     dout(20) << __func__ << " waiting for rw locks " << dendl;
     op->mark_delayed("waiting for rw locks");
     close_op_ctx(ctx, -EBUSY);
+    return;
+  }
+
+  if (r) {
+    dout(20) << __func__ << " returned an error: " << r << dendl;
+    close_op_ctx(ctx, r);
+    osd->reply_op_error(op, r);
     return;
   }
 
@@ -1758,10 +1844,14 @@ bool ReplicatedPG::maybe_handle_cache(OpRequestRef op,
     dout(25) << __func__ << " " << obc->obs.oi << " "
 	     << (obc->obs.exists ? "exists" : "DNE")
 	     << " missing_oid " << missing_oid
+	     << " must_promote " << (int)must_promote
+	     << " in_hit_set " << (int)in_hit_set
 	     << dendl;
   else
     dout(25) << __func__ << " (no obc)"
 	     << " missing_oid " << missing_oid
+	     << " must_promote " << (int)must_promote
+	     << " in_hit_set " << (int)in_hit_set
 	     << dendl;
 
   // if it is write-ordered and blocked, stop now
@@ -1788,13 +1878,23 @@ bool ReplicatedPG::maybe_handle_cache(OpRequestRef op,
     return true;
   }
 
+  // older versions do not proxy the feature bits.
+  bool can_proxy_read = get_osdmap()->get_up_osd_features() &
+    CEPH_FEATURE_OSD_PROXY_FEATURES;
+  OpRequestRef promote_op;
+
   switch (pool.info.cache_mode) {
   case pg_pool_t::CACHEMODE_WRITEBACK:
     if (agent_state &&
 	agent_state->evict_mode == TierAgentState::EVICT_MODE_FULL) {
       if (!op->may_write() && !op->may_cache() && !write_ordered) {
-	dout(20) << __func__ << " cache pool full, proxying read" << dendl;
-	do_proxy_read(op);
+	if (can_proxy_read) {
+	  dout(20) << __func__ << " cache pool full, proxying read" << dendl;
+	  do_proxy_read(op);
+	} else {
+	  dout(20) << __func__ << " cache pool full, redirect read" << dendl;
+	  do_cache_redirect(op);
+	}
 	return true;
       }
       dout(20) << __func__ << " cache pool full, waiting" << dendl;
@@ -1809,8 +1909,10 @@ bool ReplicatedPG::maybe_handle_cache(OpRequestRef op,
       return true;
     }
 
-    // Always proxy
-    do_proxy_read(op);
+    if (can_proxy_read)
+      do_proxy_read(op);
+    else
+      promote_op = op;   // for non-proxy case promote_object needs this
 
     // Avoid duplicate promotion
     if (obc.get() && obc->is_blocked()) {
@@ -1820,17 +1922,19 @@ bool ReplicatedPG::maybe_handle_cache(OpRequestRef op,
     // Promote too?
     switch (pool.info.min_read_recency_for_promote) {
     case 0:
-      promote_object(obc, missing_oid, oloc, OpRequestRef());
+      promote_object(obc, missing_oid, oloc, promote_op);
       break;
     case 1:
       // Check if in the current hit set
       if (in_hit_set) {
-	promote_object(obc, missing_oid, oloc, OpRequestRef());
+	promote_object(obc, missing_oid, oloc, promote_op);
+      } else if (!can_proxy_read) {
+	do_cache_redirect(op);
       }
       break;
     default:
       if (in_hit_set) {
-	promote_object(obc, missing_oid, oloc, OpRequestRef());
+	promote_object(obc, missing_oid, oloc, promote_op);
       } else {
 	// Check if in other hit sets
 	map<time_t,HitSetRef>::iterator itor;
@@ -1842,7 +1946,9 @@ bool ReplicatedPG::maybe_handle_cache(OpRequestRef op,
 	  }
 	}
 	if (in_other_hit_sets) {
-	  promote_object(obc, missing_oid, oloc, OpRequestRef());
+	  promote_object(obc, missing_oid, oloc, promote_op);
+	} else if (!can_proxy_read) {
+	  do_cache_redirect(op);
 	}
       }
       break;
@@ -1956,8 +2062,10 @@ struct C_ProxyRead : public Context {
     if (prdop->canceled)
       return;
     pg->lock();
-    if (prdop->canceled)
+    if (prdop->canceled) {
+      pg->unlock();
       return;
+    }
     if (last_peering_reset == pg->get_last_peering_reset()) {
       pg->finish_proxy_read(oid, tid, r);
     }
@@ -1992,7 +2100,8 @@ void ReplicatedPG::do_proxy_read(OpRequestRef op)
     m->get_snapid(), NULL,
     flags, new C_OnFinisher(fin, &osd->objecter_finisher),
     &prdop->user_version,
-    &prdop->data_offset);
+    &prdop->data_offset,
+    m->get_features());
   fin->tid = tid;
   prdop->objecter_tid = tid;
   proxyread_ops[tid] = prdop;
@@ -2034,6 +2143,8 @@ void ReplicatedPG::finish_proxy_read(hobject_t oid, ceph_tid_t tid, int r)
   if (q->second.size() == 0) {
     in_progress_proxy_reads.erase(oid);
   }
+
+  osd->logger->inc(l_osd_tier_proxy_read);
 
   MOSDOp *m = static_cast<MOSDOp*>(op->get_req());
   OpContext *ctx = new OpContext(op, m->get_reqid(), prdop->ops, this);
@@ -2149,8 +2260,6 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
   ctx->op_t = pgbackend->get_transaction();
 
   if (op->may_write() || op->may_cache()) {
-    op->mark_started();
-
     // snap
     if (!(m->get_flags() & CEPH_OSD_FLAG_ENFORCE_SNAPC) &&
 	pool.info.is_pool_snaps_mode()) {
@@ -2404,8 +2513,8 @@ void ReplicatedPG::do_sub_op(OpRequestRef op)
     first = &m->ops[0];
   }
 
-  if (!is_active()) {
-    waiting_for_active.push_back(op);
+  if (!is_peered()) {
+    waiting_for_peered.push_back(op);
     op->mark_delayed("waiting for active");
     return;
   }
@@ -5340,7 +5449,7 @@ int ReplicatedPG::_rollback_to(OpContext *ctx, ceph_osd_op& op)
     assert(0 == "unexpected error code in _rollback_to");
   } else { //we got our context, let's use it to do the rollback!
     hobject_t& rollback_to_sobject = rollback_to->obs.oi.soid;
-    if (is_degraded_object(rollback_to_sobject)) {
+    if (is_degraded_or_backfilling_object(rollback_to_sobject)) {
       dout(20) << "_rollback_to attempted to roll back to a degraded object "
 	       << rollback_to_sobject << " (requested snapid: ) " << snapid << dendl;
       wait_for_degraded_object(rollback_to_sobject, ctx->op);
@@ -5894,18 +6003,18 @@ void ReplicatedPG::finish_ctx(OpContext *ctx, int log_op_type, bool maintain_ssc
       dout(10) << " final snapset " << ctx->new_snapset
 	       << " in " << soid << dendl;
       setattr_maybe_cache(ctx->obc, ctx, ctx->op_t, SS_ATTR, bss);
-
-      if (pool.info.require_rollback()) {
-	set<string> changing;
-	changing.insert(OI_ATTR);
-	changing.insert(SS_ATTR);
-	ctx->obc->fill_in_setattrs(changing, &(ctx->mod_desc));
-      } else {
-	// replicated pools are never rollbackable in this case
-	ctx->mod_desc.mark_unrollbackable();
-      }
     } else {
       dout(10) << " no snapset (this is a clone)" << dendl;
+    }
+
+    if (pool.info.require_rollback()) {
+      set<string> changing;
+      changing.insert(OI_ATTR);
+      changing.insert(SS_ATTR);
+      ctx->obc->fill_in_setattrs(changing, &(ctx->mod_desc));
+    } else {
+      // replicated pools are never rollbackable in this case
+      ctx->mod_desc.mark_unrollbackable();
     }
   } else {
     ctx->new_obs.oi = object_info_t(ctx->obc->obs.oi.soid);
@@ -6078,7 +6187,8 @@ int ReplicatedPG::fill_in_copy_get(
     return result;
   }
 
-  uint64_t features = ctx->op->get_req()->get_connection()->get_features();
+  MOSDOp *op = reinterpret_cast<MOSDOp*>(ctx->op->get_req());
+  uint64_t features = op->get_features();
 
   bool async_read_started = false;
   object_copy_data_t _reply_obj;
@@ -6445,7 +6555,7 @@ void ReplicatedPG::process_copy_chunk(hobject_t oid, ceph_tid_t tid, int r)
   // cancel and requeue proxy reads on this object
   kick_proxy_read_blocked(cobc->obs.oi.soid);
   for (map<ceph_tid_t, ProxyReadOpRef>::iterator it = proxyread_ops.begin();
-      it != proxyread_ops.end(); it++) {
+      it != proxyread_ops.end(); ++it) {
     if (it->second->soid == cobc->obs.oi.soid) {
       cancel_proxy_read(it->second);
     }
@@ -7332,7 +7442,7 @@ void ReplicatedPG::op_applied(const eversion_t &applied_version)
         osd->scrub_wq.queue(this);
       }
     } else {
-      assert(!scrubber.block_writes);
+      assert(scrubber.start == scrubber.end);
     }
   } else {
     if (scrubber.active_rep_scrub) {
@@ -7363,99 +7473,94 @@ void ReplicatedPG::eval_repop(RepGather *repop)
   if (repop->rep_done)
     return;
 
-  if (m) {
+  // ondisk?
+  if (repop->all_committed) {
+    if (repop->ctx->op && !repop->log_op_stat) {
+      log_op_stats(repop->ctx);
+      repop->log_op_stat = true;
+    }
+    publish_stats_to_osd();
 
-    // an 'ondisk' reply implies 'ack'. so, prefer to send just one
-    // ondisk instead of ack followed by ondisk.
-
-    // ondisk?
-    if (repop->all_committed) {
-
-      if (!repop->log_op_stat) {
-        log_op_stats(repop->ctx);
-        repop->log_op_stat = true;
+    // send dup commits, in order
+    if (waiting_for_ondisk.count(repop->v)) {
+      assert(waiting_for_ondisk.begin()->first == repop->v);
+      for (list<pair<OpRequestRef, version_t> >::iterator i =
+	     waiting_for_ondisk[repop->v].begin();
+	   i != waiting_for_ondisk[repop->v].end();
+	   ++i) {
+	osd->reply_op_error(i->first, 0, repop->ctx->at_version,
+			    i->second);
       }
-      publish_stats_to_osd();
-
-      // send dup commits, in order
-      if (waiting_for_ondisk.count(repop->v)) {
-	assert(waiting_for_ondisk.begin()->first == repop->v);
-	for (list<OpRequestRef>::iterator i = waiting_for_ondisk[repop->v].begin();
-	     i != waiting_for_ondisk[repop->v].end();
-	     ++i) {
-	  osd->reply_op_error(*i, 0, repop->ctx->at_version,
-			      repop->ctx->user_at_version);
-	}
-	waiting_for_ondisk.erase(repop->v);
-      }
-
-      // clear out acks, we sent the commits above
-      if (waiting_for_ack.count(repop->v)) {
-	assert(waiting_for_ack.begin()->first == repop->v);
-	waiting_for_ack.erase(repop->v);
-      }
-
-      if (m->wants_ondisk() && !repop->sent_disk) {
-	// send commit.
-	MOSDOpReply *reply = repop->ctx->reply;
-	if (reply)
-	  repop->ctx->reply = NULL;
-	else {
-	  reply = new MOSDOpReply(m, 0, get_osdmap()->get_epoch(), 0, true);
-	  reply->set_reply_versions(repop->ctx->at_version,
-	                            repop->ctx->user_at_version);
-	}
-	reply->add_flags(CEPH_OSD_FLAG_ACK | CEPH_OSD_FLAG_ONDISK);
-	dout(10) << " sending commit on " << *repop << " " << reply << dendl;
-	osd->send_message_osd_client(reply, m->get_connection());
-	repop->sent_disk = true;
-	repop->ctx->op->mark_commit_sent();
-      }
+      waiting_for_ondisk.erase(repop->v);
     }
 
-    // applied?
-    if (repop->all_applied) {
+    // clear out acks, we sent the commits above
+    if (waiting_for_ack.count(repop->v)) {
+      assert(waiting_for_ack.begin()->first == repop->v);
+      waiting_for_ack.erase(repop->v);
+    }
 
-      // send dup acks, in order
-      if (waiting_for_ack.count(repop->v)) {
-	assert(waiting_for_ack.begin()->first == repop->v);
-	for (list<OpRequestRef>::iterator i = waiting_for_ack[repop->v].begin();
-	     i != waiting_for_ack[repop->v].end();
-	     ++i) {
-	  MOSDOp *m = (MOSDOp*)(*i)->get_req();
-	  MOSDOpReply *reply = new MOSDOpReply(m, 0, get_osdmap()->get_epoch(), 0, true);
-	  reply->set_reply_versions(repop->ctx->at_version,
-	                            repop->ctx->user_at_version);
-	  reply->add_flags(CEPH_OSD_FLAG_ACK);
-	  osd->send_message_osd_client(reply, m->get_connection());
-	}
-	waiting_for_ack.erase(repop->v);
+    if (m && m->wants_ondisk() && !repop->sent_disk) {
+      // send commit.
+      MOSDOpReply *reply = repop->ctx->reply;
+      if (reply)
+	repop->ctx->reply = NULL;
+      else {
+	reply = new MOSDOpReply(m, 0, get_osdmap()->get_epoch(), 0, true);
+	reply->set_reply_versions(repop->ctx->at_version,
+				  repop->ctx->user_at_version);
       }
+      reply->add_flags(CEPH_OSD_FLAG_ACK | CEPH_OSD_FLAG_ONDISK);
+      dout(10) << " sending commit on " << *repop << " " << reply << dendl;
+      osd->send_message_osd_client(reply, m->get_connection());
+      repop->sent_disk = true;
+      repop->ctx->op->mark_commit_sent();
+    }
+  }
 
-      if (m->wants_ack() && !repop->sent_ack && !repop->sent_disk) {
-	// send ack
-	MOSDOpReply *reply = repop->ctx->reply;
-	if (reply)
-	  repop->ctx->reply = NULL;
-	else {
-	  reply = new MOSDOpReply(m, 0, get_osdmap()->get_epoch(), 0, true);
-	  reply->set_reply_versions(repop->ctx->at_version,
-	                            repop->ctx->user_at_version);
-	}
+  // applied?
+  if (repop->all_applied) {
+
+    // send dup acks, in order
+    if (waiting_for_ack.count(repop->v)) {
+      assert(waiting_for_ack.begin()->first == repop->v);
+      for (list<pair<OpRequestRef, version_t> >::iterator i =
+	     waiting_for_ack[repop->v].begin();
+	   i != waiting_for_ack[repop->v].end();
+	   ++i) {
+	MOSDOp *m = (MOSDOp*)i->first->get_req();
+	MOSDOpReply *reply = new MOSDOpReply(m, 0, get_osdmap()->get_epoch(), 0, true);
+	reply->set_reply_versions(repop->ctx->at_version,
+				  i->second);
 	reply->add_flags(CEPH_OSD_FLAG_ACK);
-	dout(10) << " sending ack on " << *repop << " " << reply << dendl;
-        assert(entity_name_t::TYPE_OSD != m->get_connection()->peer_type);
 	osd->send_message_osd_client(reply, m->get_connection());
-	repop->sent_ack = true;
       }
-
-      // note the write is now readable (for rlatency calc).  note
-      // that this will only be defined if the write is readable
-      // _prior_ to being committed; it will not get set with
-      // writeahead journaling, for instance.
-      if (repop->ctx->readable_stamp == utime_t())
-	repop->ctx->readable_stamp = ceph_clock_now(cct);
+      waiting_for_ack.erase(repop->v);
     }
+
+    if (m && m->wants_ack() && !repop->sent_ack && !repop->sent_disk) {
+      // send ack
+      MOSDOpReply *reply = repop->ctx->reply;
+      if (reply)
+	repop->ctx->reply = NULL;
+      else {
+	reply = new MOSDOpReply(m, 0, get_osdmap()->get_epoch(), 0, true);
+	reply->set_reply_versions(repop->ctx->at_version,
+				  repop->ctx->user_at_version);
+      }
+      reply->add_flags(CEPH_OSD_FLAG_ACK);
+      dout(10) << " sending ack on " << *repop << " " << reply << dendl;
+      assert(entity_name_t::TYPE_OSD != m->get_connection()->peer_type);
+      osd->send_message_osd_client(reply, m->get_connection());
+      repop->sent_ack = true;
+    }
+
+    // note the write is now readable (for rlatency calc).  note
+    // that this will only be defined if the write is readable
+    // _prior_ to being committed; it will not get set with
+    // writeahead journaling, for instance.
+    if (repop->ctx->readable_stamp == utime_t())
+      repop->ctx->readable_stamp = ceph_clock_now(cct);
   }
 
   // done.
@@ -7558,6 +7663,40 @@ void ReplicatedPG::issue_repop(RepGather *repop, utime_t now)
     repop->ctx->reqid,
     repop->ctx->op);
   repop->ctx->op_t = NULL;
+
+  if (is_degraded_or_backfilling_object(soid)) {
+    dout(10) << __func__ << ": " << soid
+	     << " degraded, maintaining missing sets"
+	     << dendl;
+    assert(!is_missing_object(soid));
+    for (vector<pg_log_entry_t>::iterator j = repop->ctx->log.begin();
+	 j != repop->ctx->log.end();
+	 ++j) {
+      for (set<pg_shard_t>::const_iterator peer = actingbackfill.begin();
+	   peer != actingbackfill.end();
+	   ++peer) {
+	if (*peer == pg_whoami) {
+	  assert(!is_missing_object(j->soid));
+	  continue;
+	}
+	map<pg_shard_t, pg_missing_t>::iterator pm = peer_missing.find(*peer);
+	assert(pm != peer_missing.end());
+	if (!pm->second.is_missing(soid)) {
+	  assert(!pm->second.is_missing(j->soid));
+	  continue;
+	}
+	dout(10) << __func__ << ": " << soid << " missing on "
+		 << *peer << ", adding event " << *j << " to missing"
+		 << dendl;
+	pm->second.add_next_event(*j);
+      }
+      missing_loc.rebuild_object_location(
+	j->soid,
+	actingbackfill,
+	get_all_missing(),
+	get_all_info());
+    }
+  }
 }
 
 template<typename T, int MSGTYPE>
@@ -7570,7 +7709,7 @@ Message * ReplicatedBackend::generate_subop(
   eversion_t pg_trim_rollback_to,
   hobject_t new_temp_oid,
   hobject_t discard_temp_oid,
-  vector<pg_log_entry_t> &log_entries,
+  const vector<pg_log_entry_t> &log_entries,
   boost::optional<pg_hit_set_history_t> &hset_hist,
   InProgressOp *op,
   ObjectStore::Transaction *op_t,
@@ -7595,6 +7734,7 @@ Message * ReplicatedBackend::generate_subop(
 	     << ", pinfo.last_backfill "
 	     << pinfo.last_backfill << ")" << dendl;
     ObjectStore::Transaction t;
+    t.set_use_tbl(op_t->get_use_tbl());
     ::encode(t, wr->get_data());
   } else {
     ::encode(*op_t, wr->get_data());
@@ -7625,7 +7765,7 @@ void ReplicatedBackend::issue_op(
   eversion_t pg_trim_rollback_to,
   hobject_t new_temp_oid,
   hobject_t discard_temp_oid,
-  vector<pg_log_entry_t> &log_entries,
+  const vector<pg_log_entry_t> &log_entries,
   boost::optional<pg_hit_set_history_t> &hset_hist,
   InProgressOp *op,
   ObjectStore::Transaction *op_t)
@@ -7849,7 +7989,7 @@ void ReplicatedPG::handle_watch_timeout(WatchRef watch)
   ObjectContextRef obc = watch->get_obc(); // handle_watch_timeout owns this ref
   dout(10) << "handle_watch_timeout obc " << obc << dendl;
 
-  if (is_degraded_object(obc->obs.oi.soid)) {
+  if (is_degraded_or_backfilling_object(obc->obs.oi.soid)) {
     callbacks_for_degraded_object[obc->obs.oi.soid].push_back(
       watch->get_delayed_cb()
       );
@@ -7869,12 +8009,8 @@ void ReplicatedPG::handle_watch_timeout(WatchRef watch)
     return;
   }
 
-  vector<OSDOp> ops;
-  ceph_tid_t rep_tid = osd->get_tid();
-  osd_reqid_t reqid(osd->get_cluster_msgr_name(), 0, rep_tid);
-  OpContext *ctx = new OpContext(OpRequestRef(), reqid, ops, obc, this);
-  ctx->op_t = pgbackend->get_transaction();
-  ctx->mtime = ceph_clock_now(cct);
+  RepGather *repop = simple_repop_create(obc);
+  OpContext *ctx = repop->ctx;
   ctx->at_version = get_next_version();
 
   object_info_t& oi = ctx->new_obs.oi;
@@ -7886,7 +8022,6 @@ void ReplicatedPG::handle_watch_timeout(WatchRef watch)
 
 
   entity_inst_t nobody;
-  RepGather *repop = new_repop(ctx, obc, rep_tid);
   PGBackend::PGTransaction *t = ctx->op_t;
   ctx->log.push_back(pg_log_entry_t(pg_log_entry_t::MODIFY, obc->obs.oi.soid,
 				    ctx->at_version,
@@ -7909,9 +8044,10 @@ void ReplicatedPG::handle_watch_timeout(WatchRef watch)
   }
 
   // obc ref swallowed by repop!
-  issue_repop(repop, repop->ctx->mtime);
-  eval_repop(repop);
-  repop->put();
+  simple_repop_submit(repop);
+
+  // apply new object state.
+  ctx->obc->obs = ctx->new_obs;
 }
 
 ObjectContextRef ReplicatedPG::create_object_context(const object_info_t& oi,
@@ -7926,7 +8062,8 @@ ObjectContextRef ReplicatedPG::create_object_context(const object_info_t& oi,
   if (ssc)
     register_snapset_context(ssc);
   dout(10) << "create_object_context " << (void*)obc.get() << " " << oi.soid << " " << dendl;
-  populate_obc_watchers(obc);
+  if (is_active())
+    populate_obc_watchers(obc);
   return obc;
 }
 
@@ -7994,7 +8131,8 @@ ObjectContextRef ReplicatedPG::get_object_context(const hobject_t& soid,
       soid, true,
       soid.has_snapset() ? attrs : 0);
 
-    populate_obc_watchers(obc);
+    if (is_active())
+      populate_obc_watchers(obc);
 
     if (pool.info.require_rollback()) {
       if (attrs) {
@@ -8425,9 +8563,6 @@ void ReplicatedBackend::sub_op_modify_impl(OpRequestRef op)
   // sanity checks
   assert(m->map_epoch >= get_info().history.same_interval_since);
   
-  // we better not be missing this.
-  assert(!parent->get_log().get_missing().is_missing(soid));
-
   int ackerosd = m->get_source().num();
   
   op->mark_started();
@@ -10160,10 +10295,16 @@ void ReplicatedPG::apply_and_flush_repops(bool requeue)
       }
 
       // also requeue any dups, interleaved into position
-      map<eversion_t, list<OpRequestRef> >::iterator p = waiting_for_ondisk.find(repop->v);
+      map<eversion_t, list<pair<OpRequestRef, version_t> > >::iterator p =
+	waiting_for_ondisk.find(repop->v);
       if (p != waiting_for_ondisk.end()) {
 	dout(10) << " also requeuing ondisk waiters " << p->second << dendl;
-	rq.splice(rq.end(), p->second);
+	for (list<pair<OpRequestRef, version_t> >::iterator i =
+	       p->second.begin();
+	     i != p->second.end();
+	     ++i) {
+	  rq.push_back(i->first);
+	}
 	waiting_for_ondisk.erase(p);
       }
     }
@@ -10171,17 +10312,21 @@ void ReplicatedPG::apply_and_flush_repops(bool requeue)
     remove_repop(repop);
   }
 
+  assert(repop_map.empty());
+  assert(repop_queue.empty());
+
   if (requeue) {
     requeue_ops(rq);
     if (!waiting_for_ondisk.empty()) {
-      for (map<eversion_t, list<OpRequestRef> >::iterator i =
+      for (map<eversion_t, list<pair<OpRequestRef, version_t> > >::iterator i =
 	     waiting_for_ondisk.begin();
 	   i != waiting_for_ondisk.end();
 	   ++i) {
-	for (list<OpRequestRef>::iterator j = i->second.begin();
+	for (list<pair<OpRequestRef, version_t> >::iterator j =
+	       i->second.begin();
 	     j != i->second.end();
 	     ++j) {
-	  derr << __func__ << ": op " << *((*j)->get_req()) << " waiting on "
+	  derr << __func__ << ": op " << *(j->first->get_req()) << " waiting on "
 	       << i->first << dendl;
 	}
       }
@@ -10198,9 +10343,9 @@ void ReplicatedPG::on_flushed()
   assert(flushes_in_progress > 0);
   flushes_in_progress--;
   if (flushes_in_progress == 0) {
-    requeue_ops(waiting_for_active);
+    requeue_ops(waiting_for_peered);
   }
-  if (!is_active() || !is_primary()) {
+  if (!is_peered() || !is_primary()) {
     pair<hobject_t, ObjectContextRef> i;
     while (object_contexts.get_next(i.first, &i)) {
       derr << "on_flushed: object " << i.first << " obc still alive" << dendl;
@@ -10253,6 +10398,7 @@ void ReplicatedPG::on_shutdown()
   pgbackend->on_change();
 
   context_registry_on_change();
+  object_contexts.clear();
 
   osd->remote_reserver.cancel_reservation(info.pgid);
   osd->local_reserver.cancel_reservation(info.pgid);
@@ -10322,18 +10468,14 @@ void ReplicatedPG::on_change(ObjectStore::Transaction *t)
 
   // requeue everything in the reverse order they should be
   // reexamined.
+  requeue_ops(waiting_for_peered);
+
   clear_scrub_reserved();
+
+  // requeues waiting_for_active
   scrub_clear_state();
 
   context_registry_on_change();
-
-  for (list<pair<OpRequestRef, OpContext*> >::iterator i =
-         in_progress_async_reads.begin();
-       i != in_progress_async_reads.end();
-       in_progress_async_reads.erase(i++)) {
-    close_op_ctx(i->second, -ECANCELED);
-    requeue_op(i->first);
-  }
 
   cancel_copy_ops(is_primary());
   cancel_flush_ops(is_primary());
@@ -10362,6 +10504,13 @@ void ReplicatedPG::on_change(ObjectStore::Transaction *t)
     else
       p->second.clear();
   }
+  for (map<hobject_t, list<Context*> >::iterator i =
+	 callbacks_for_degraded_object.begin();
+       i != callbacks_for_degraded_object.end();
+    ) {
+    finish_degraded_object((i++)->first);
+  }
+  assert(callbacks_for_degraded_object.empty());
 
   if (is_primary()) {
     requeue_ops(waiting_for_cache_not_full);
@@ -10369,6 +10518,16 @@ void ReplicatedPG::on_change(ObjectStore::Transaction *t)
   } else {
     waiting_for_cache_not_full.clear();
     waiting_for_all_missing.clear();
+  }
+
+
+  for (list<pair<OpRequestRef, OpContext*> >::iterator i =
+         in_progress_async_reads.begin();
+       i != in_progress_async_reads.end();
+       in_progress_async_reads.erase(i++)) {
+    close_op_ctx(i->second, -ECANCELED);
+    if (is_primary())
+      requeue_op(i->first);
   }
 
   // this will requeue ops we were working on but didn't finish, and
@@ -10425,23 +10584,36 @@ void ReplicatedPG::_clear_recovery_state()
   recovering_oids.clear();
 #endif
   last_backfill_started = hobject_t();
-  list<OpRequestRef> blocked_ops;
   set<hobject_t>::iterator i = backfills_in_flight.begin();
   while (i != backfills_in_flight.end()) {
     assert(recovering.count(*i));
-    recovering[*i]->drop_backfill_read(&blocked_ops);
-    requeue_ops(blocked_ops);
     backfills_in_flight.erase(i++);
+  }
+
+  list<OpRequestRef> blocked_ops;
+  for (map<hobject_t, ObjectContextRef>::iterator i = recovering.begin();
+       i != recovering.end();
+       recovering.erase(i++)) {
+    if (i->second) {
+      i->second->drop_recovery_read(&blocked_ops);
+      requeue_ops(blocked_ops);
+    }
   }
   assert(backfills_in_flight.empty());
   pending_backfill_updates.clear();
-  recovering.clear();
-  pgbackend->clear_state();
+  assert(recovering.empty());
+  pgbackend->clear_recovery_state();
 }
 
 void ReplicatedPG::cancel_pull(const hobject_t &soid)
 {
   assert(recovering.count(soid));
+  ObjectContextRef obc = recovering[soid];
+  if (obc) {
+    list<OpRequestRef> blocked_ops;
+    obc->drop_recovery_read(&blocked_ops);
+    requeue_ops(blocked_ops);
+  }
   recovering.erase(soid);
   finish_recovery_op(soid);
   if (is_missing_object(soid))
@@ -10572,6 +10744,10 @@ bool ReplicatedPG::start_recovery_ops(
       waiting_on_backfill.empty()) {
     if (get_osdmap()->test_flag(CEPH_OSDMAP_NOBACKFILL)) {
       dout(10) << "deferring backfill due to NOBACKFILL" << dendl;
+      deferred_backfill = true;
+    } else if (get_osdmap()->test_flag(CEPH_OSDMAP_NOREBALANCE) &&
+	       !is_degraded())  {
+      dout(10) << "deferring backfill due to NOREBALANCE" << dendl;
       deferred_backfill = true;
     } else if (!backfill_reserved) {
       dout(10) << "deferring backfill due to !backfill_reserved" << dendl;
@@ -10857,6 +11033,15 @@ int ReplicatedPG::prep_object_replica_pushes(
 			<< ", will try copies on " << missing_loc.get_locations(soid)
 			<< "\n";
     return 0;
+  }
+
+  if (!obc->get_recovery_read()) {
+    dout(20) << "recovery delayed on " << soid
+	     << "; could not get rw_manager lock" << dendl;
+    return 0;
+  } else {
+    dout(20) << "recovery got recovery read lock on " << soid
+	     << dendl;
   }
 
   start_recovery_op(soid);
@@ -11226,7 +11411,7 @@ int ReplicatedPG::recover_backfill(
       if (!need_ver_targs.empty() || !missing_targs.empty()) {
 	ObjectContextRef obc = get_object_context(backfill_info.begin, false);
 	assert(obc);
-	if (obc->get_backfill_read()) {
+	if (obc->get_recovery_read()) {
 	  if (!need_ver_targs.empty()) {
 	    dout(20) << " BACKFILL replacing " << check
 		   << " with ver " << obj_v
@@ -11732,13 +11917,13 @@ void ReplicatedPG::hit_set_persist()
     hobject_t aoid = get_hit_set_archive_object(p->begin, p->end);
 
     // Once we hit a degraded object just skip further trim
-    if (is_degraded_object(aoid))
+    if (is_degraded_or_backfilling_object(aoid))
       return;
   }
 
   oid = get_hit_set_archive_object(start, now);
   // If the current object is degraded we skip this persist request
-  if (is_degraded_object(oid))
+  if (is_degraded_or_backfilling_object(oid))
     return;
 
   // If backfill is in progress and we could possibly overlap with the
@@ -11889,7 +12074,7 @@ void ReplicatedPG::hit_set_trim(RepGather *repop, unsigned max)
     assert(p != updated_hit_set_hist.history.end());
     hobject_t oid = get_hit_set_archive_object(p->begin, p->end);
 
-    assert(!is_degraded_object(oid));
+    assert(!is_degraded_or_backfilling_object(oid));
 
     dout(20) << __func__ << " removing " << oid << dendl;
     ++repop->ctx->at_version.version;
@@ -12039,7 +12224,7 @@ bool ReplicatedPG::agent_work(int start_max)
       osd->logger->inc(l_osd_agent_skip);
       continue;
     }
-    if (is_degraded_object(*p)) {
+    if (is_degraded_or_backfilling_object(*p)) {
       dout(20) << __func__ << " skip (degraded) " << *p << dendl;
       osd->logger->inc(l_osd_agent_skip);
       continue;
@@ -12343,9 +12528,15 @@ bool ReplicatedPG::agent_maybe_evict(ObjectContextRef& obc)
       return false;
   }
 
+  if (!obc->get_write(OpRequestRef())) {
+    dout(20) << __func__ << " skip (cannot get lock) " << obc->obs.oi << dendl;
+    return false;
+  }
+
   dout(10) << __func__ << " evicting " << obc->obs.oi << dendl;
   RepGather *repop = simple_repop_create(obc);
   OpContext *ctx = repop->ctx;
+  ctx->lock_to_release = OpContext::W_LOCK;
   ctx->at_version = get_next_version();
   assert(ctx->new_obs.exists);
   int r = _delete_oid(ctx, true);
@@ -12645,7 +12836,9 @@ void ReplicatedPG::_scrub_digest_updated()
   }
 }
 
-void ReplicatedPG::_scrub(ScrubMap& scrubmap)
+void ReplicatedPG::_scrub(
+  ScrubMap &scrubmap,
+  const map<hobject_t, pair<uint32_t, uint32_t> > &missing_digest)
 {
   dout(10) << "_scrub" << dendl;
 
@@ -12860,9 +13053,9 @@ void ReplicatedPG::_scrub(ScrubMap& scrubmap)
   }
 
   if (scrubber.shallow_errors == 0) {
-    for (map<hobject_t,pair<uint32_t,uint32_t> >::iterator p =
-	   scrubber.missing_digest.begin();
-	 p != scrubber.missing_digest.end();
+    for (map<hobject_t,pair<uint32_t,uint32_t> >::const_iterator p =
+	   missing_digest.begin();
+	 p != missing_digest.end();
 	 ++p) {
       if (p->first.is_snapdir())
 	continue;

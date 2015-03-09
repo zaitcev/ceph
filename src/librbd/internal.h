@@ -76,7 +76,6 @@ namespace librbd {
   const std::string id_obj_name(const std::string &name);
   const std::string header_name(const std::string &image_id);
   const std::string old_header_name(const std::string &image_name);
-  const std::string object_map_name(const std::string &image_id);
 
   int detect_format(librados::IoCtx &io_ctx, const std::string &name,
 		    bool *old_format, uint64_t *size);
@@ -104,6 +103,7 @@ namespace librbd {
   int get_overlap(ImageCtx *ictx, uint64_t *overlap);
   int get_parent_info(ImageCtx *ictx, std::string *parent_pool_name,
 		      std::string *parent_name, std::string *parent_snap_name);
+  int get_flags(ImageCtx *ictx, uint64_t *flags);
   int is_exclusive_lock_owner(ImageCtx *ictx, bool *is_owner);
 
   int remove(librados::IoCtx& io_ctx, const char *imgname,
@@ -119,7 +119,7 @@ namespace librbd {
   int snap_unprotect(ImageCtx *ictx, const char *snap_name);
   int snap_is_protected(ImageCtx *ictx, const char *snap_name,
 			bool *is_protected);
-  int add_snap(ImageCtx *ictx, const char *snap_name);
+  int add_snap(ImageCtx *ictx, const char *snap_name, bool lock_owner);
   int rm_snap(ImageCtx *ictx, const char *snap_name);
   int refresh_parent(ImageCtx *ictx);
   int ictx_check(ImageCtx *ictx);

@@ -24,6 +24,9 @@ public:
 
   ObjectMap(ImageCtx &image_ctx);
 
+  static std::string object_map_name(const std::string &image_id,
+				     uint64_t snap_id);
+
   int lock();
   int unlock();
 
@@ -31,15 +34,19 @@ public:
 
   void aio_resize(uint64_t new_size, uint8_t default_object_state,
 		  Context *on_finish);
-  void aio_update(uint64_t object_no, uint8_t new_state,
-		 const boost::optional<uint8_t> &current_state,
-		 Context *on_finish);
-  void aio_update(uint64_t start_object_no, uint64_t end_object_no,
+  bool aio_update(uint64_t object_no, uint8_t new_state,
+		  const boost::optional<uint8_t> &current_state,
+		  Context *on_finish);
+  bool aio_update(uint64_t start_object_no, uint64_t end_object_no,
 		  uint8_t new_state,
 		  const boost::optional<uint8_t> &current_state,
 		  Context *on_finish);
 
-  int refresh();
+  void refresh(uint64_t snap_id);
+  void rollback(uint64_t snap_id);
+  void snapshot(uint64_t snap_id);
+
+  bool enabled() const;
 
 private:
 
@@ -68,7 +75,7 @@ private:
 
     State m_state;
 
-    void invalidate();
+    bool invalidate();
   }; 
 
   class ResizeRequest : public Request {
@@ -113,7 +120,9 @@ private:
 
   ImageCtx &m_image_ctx;
 
-  ceph::BitVector<2> object_map;
+  ceph::BitVector<2> m_object_map;
+
+  bool m_enabled;
 
   void invalidate();
 

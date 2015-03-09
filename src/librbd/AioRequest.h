@@ -34,21 +34,14 @@ namespace librbd {
                Context *completion, bool hide_enoent);
     virtual ~AioRequest();
 
-    void complete(int r)
-    {
-      if (should_complete(r)) {
-	if (m_hide_enoent && r == -ENOENT)
-	  r = 0;
-	m_completion->complete(r);
-	delete this;
-      }
-    }
+    void complete(int r);
 
     virtual bool should_complete(int r) = 0;
     virtual int send() = 0;
 
   protected:
-    void read_from_parent(vector<pair<uint64_t,uint64_t> >& image_extents);
+    void read_from_parent(vector<pair<uint64_t,uint64_t> >& image_extents,
+                          bool block_completion);
 
     ImageCtx *m_ictx;
     std::string m_oid;
@@ -75,10 +68,6 @@ namespace librbd {
 
     ceph::bufferlist &data() {
       return m_read_data;
-    }
-
-    int get_op_flags() {
-      return m_op_flags;
     }
 
     std::map<uint64_t, uint64_t> m_ext_map;
@@ -192,8 +181,6 @@ namespace librbd {
     }
 
   private:
-    librados::IoCtx m_io_ctx;
-
     bool send_pre();
     bool send_post();
     void send_write();
@@ -249,15 +236,18 @@ namespace librbd {
   protected:
     virtual void add_write_ops(librados::ObjectWriteOperation *wr) {
       if (has_parent()) {
-	m_object_state = OBJECT_EXISTS;
 	wr->truncate(0);
       } else {
-	m_object_state = OBJECT_PENDING;
 	wr->remove();
       }
     }
 
     virtual void pre_object_map_update(uint8_t *new_state) {
+      if (has_parent()) {
+	m_object_state = OBJECT_EXISTS;
+      } else {
+	m_object_state = OBJECT_PENDING;
+      }
       *new_state = m_object_state;
     }
 

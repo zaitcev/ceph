@@ -493,6 +493,14 @@ bool MDSMonitor::prepare_beacon(MMDSBeacon *m)
     // state change
     MDSMap::mds_info_t& info = pending_mdsmap.get_info_gid(gid);
 
+    if (info.state == MDSMap::STATE_STOPPING && state != MDSMap::STATE_STOPPED ) {
+      // we can't transition to any other states from STOPPING
+      dout(0) << "got beacon for MDS in STATE_STOPPING, ignoring requested state change"
+	       << dendl;
+      _note_beacon(m);
+      return true;
+    }
+
     if (info.laggy()) {
       dout(10) << "prepare_beacon clearing laggy flag on " << addr << dendl;
       info.clear_laggy();
@@ -1320,13 +1328,12 @@ int MDSMonitor::filesystem_command(
       r = -EEXIST;
       ss << "mds." << who << " not active (" 
 	 << ceph_mds_state_name(pending_mdsmap.get_state(who)) << ")";
-    } else if ((pending_mdsmap.get_root() == who ||
-		pending_mdsmap.get_tableserver() == who) &&
-	       pending_mdsmap.get_num_in_mds() > 1) {
-      r = -EBUSY;
+    } else if (pending_mdsmap.get_root() == who ||
+		pending_mdsmap.get_tableserver() == who) {
+      r = -EINVAL;
       ss << "can't tell the root (" << pending_mdsmap.get_root()
 	 << ") or tableserver (" << pending_mdsmap.get_tableserver()
-	 << " to deactivate unless it is the last mds in the cluster";
+	 << ") to deactivate";
     } else if (pending_mdsmap.get_num_in_mds() <= size_t(pending_mdsmap.get_max_mds())) {
       r = -EBUSY;
       ss << "must decrease max_mds or else MDS will immediately reactivate";

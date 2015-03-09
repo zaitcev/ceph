@@ -4,6 +4,9 @@ TYPE(CompatSet)
 #include "include/filepath.h"
 TYPE(filepath)
 
+#include "include/util.h"
+TYPE(ceph_data_stats)
+
 #include "common/bit_vector.hpp"
 TYPE(BitVector<2>)
 
@@ -129,6 +132,9 @@ TYPE_FEATUREFUL(MonMap)
 #include "mon/MonCap.h"
 TYPE(MonCap)
 
+#include "mon/mon_types.h"
+TYPE(LevelDBStoreStats)
+
 #include "os/DBObjectMap.h"
 TYPE(DBObjectMap::_Header)
 TYPE(DBObjectMap::State)
@@ -221,6 +227,10 @@ TYPE(ETableClient)
 TYPE(ETableServer)
 #include "mds/events/EUpdate.h"
 TYPE(EUpdate)
+
+#include "librbd/WatchNotifyTypes.h"
+TYPE(librbd::WatchNotify::NotifyMessage)
+TYPE(librbd::WatchNotify::ResponseMessage)
 
 #ifdef WITH_RADOSGW
 

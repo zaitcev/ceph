@@ -525,7 +525,6 @@ rm -rf $RPM_BUILD_ROOT
 %post
 /sbin/ldconfig
 /sbin/chkconfig --add ceph
-mkdir -p %{_localstatedir}/run/ceph/
 
 %preun
 %if %{defined suse_version}
@@ -630,7 +629,7 @@ fi
 %dir %{_localstatedir}/lib/ceph/mds
 %dir %{_localstatedir}/lib/ceph/bootstrap-osd
 %dir %{_localstatedir}/lib/ceph/bootstrap-mds
-%ghost %dir %{_localstatedir}/run/ceph/
+%dir %{_localstatedir}/run/ceph/
 
 #################################################################################
 %files -n ceph-common

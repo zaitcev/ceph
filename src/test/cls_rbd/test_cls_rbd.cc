@@ -362,7 +362,8 @@ TEST_F(TestClsRbd, get_features)
   ASSERT_EQ(0, get_features(&ioctx, oid, CEPH_NOSNAP, &features));
   ASSERT_EQ(0u, features);
 
-  ASSERT_EQ(-ENOENT, get_features(&ioctx, oid, 1, &features));
+  ASSERT_EQ(0, get_features(&ioctx, oid, 1, &features));
+  ASSERT_EQ(0u, features);
 
   ioctx.close();
 }
@@ -676,7 +677,6 @@ TEST_F(TestClsRbd, snapshots)
 
   vector<string> snap_names;
   vector<uint64_t> snap_sizes;
-  vector<uint64_t> snap_features;
   SnapContext snapc;
   vector<parent_info> parents;
   vector<uint8_t> protection_status;
@@ -685,11 +685,9 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(0u, snapc.snaps.size());
   ASSERT_EQ(0u, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(0u, snap_names.size());
   ASSERT_EQ(0u, snap_sizes.size());
-  ASSERT_EQ(0u, snap_features.size());
 
   ASSERT_EQ(0, snapshot_add(&ioctx, oid, 0, "snap1"));
   ASSERT_EQ(0, get_snapcontext(&ioctx, oid, &snapc));
@@ -697,12 +695,10 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(0u, snapc.snaps[0]);
   ASSERT_EQ(0u, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(1u, snap_names.size());
   ASSERT_EQ("snap1", snap_names[0]);
   ASSERT_EQ(10u, snap_sizes[0]);
-  ASSERT_EQ(0u, snap_features[0]);
 
   // snap with same id and name
   ASSERT_EQ(-EEXIST, snapshot_add(&ioctx, oid, 0, "snap1"));
@@ -711,12 +707,10 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(0u, snapc.snaps[0]);
   ASSERT_EQ(0u, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(1u, snap_names.size());
   ASSERT_EQ("snap1", snap_names[0]);
   ASSERT_EQ(10u, snap_sizes[0]);
-  ASSERT_EQ(0u, snap_features[0]);
 
   // snap with same id, different name
   ASSERT_EQ(-EEXIST, snapshot_add(&ioctx, oid, 0, "snap2"));
@@ -725,12 +719,10 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(0u, snapc.snaps[0]);
   ASSERT_EQ(0u, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(1u, snap_names.size());
   ASSERT_EQ("snap1", snap_names[0]);
   ASSERT_EQ(10u, snap_sizes[0]);
-  ASSERT_EQ(0u, snap_features[0]);
 
   // snap with different id, same name
   ASSERT_EQ(-EEXIST, snapshot_add(&ioctx, oid, 1, "snap1"));
@@ -739,12 +731,10 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(0u, snapc.snaps[0]);
   ASSERT_EQ(0u, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(snap_names.size(), 1u);
   ASSERT_EQ(snap_names[0], "snap1");
   ASSERT_EQ(snap_sizes[0], 10u);
-  ASSERT_EQ(snap_features[0], 0u);
 
   // snap with different id, different name
   ASSERT_EQ(0, snapshot_add(&ioctx, oid, 1, "snap2"));
@@ -754,15 +744,12 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(0u, snapc.snaps[1]);
   ASSERT_EQ(1u, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(2u, snap_names.size());
   ASSERT_EQ("snap2", snap_names[0]);
   ASSERT_EQ(10u, snap_sizes[0]);
-  ASSERT_EQ(0u, snap_features[0]);
   ASSERT_EQ("snap1", snap_names[1]);
   ASSERT_EQ(10u, snap_sizes[1]);
-  ASSERT_EQ(0u, snap_features[1]);
 
   ASSERT_EQ(0, snapshot_remove(&ioctx, oid, 0));
   ASSERT_EQ(0, get_snapcontext(&ioctx, oid, &snapc));
@@ -770,12 +757,10 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(1u, snapc.snaps[0]);
   ASSERT_EQ(1u, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(1u, snap_names.size());
   ASSERT_EQ("snap2", snap_names[0]);
   ASSERT_EQ(10u, snap_sizes[0]);
-  ASSERT_EQ(0u, snap_features[0]);
 
   uint64_t size;
   uint8_t order;
@@ -792,15 +777,12 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(1u, snapc.snaps[1]);
   ASSERT_EQ(large_snap_id, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(2u, snap_names.size());
   ASSERT_EQ("snap3", snap_names[0]);
   ASSERT_EQ(0u, snap_sizes[0]);
-  ASSERT_EQ(0u, snap_features[0]);
   ASSERT_EQ("snap2", snap_names[1]);
   ASSERT_EQ(10u, snap_sizes[1]);
-  ASSERT_EQ(0u, snap_features[1]);
 
   ASSERT_EQ(0, get_size(&ioctx, oid, large_snap_id, &size, &order));
   ASSERT_EQ(0u, size);
@@ -816,12 +798,10 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(1u, snapc.snaps[0]);
   ASSERT_EQ(large_snap_id, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(1u, snap_names.size());
   ASSERT_EQ("snap2", snap_names[0]);
   ASSERT_EQ(10u, snap_sizes[0]);
-  ASSERT_EQ(0u, snap_features[0]);
 
   ASSERT_EQ(-ENOENT, snapshot_remove(&ioctx, oid, large_snap_id));
   ASSERT_EQ(0, snapshot_remove(&ioctx, oid, 1));
@@ -829,11 +809,9 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(0u, snapc.snaps.size());
   ASSERT_EQ(large_snap_id, snapc.seq);
   ASSERT_EQ(0, snapshot_list(&ioctx, oid, snapc.snaps, &snap_names,
-			     &snap_sizes, &snap_features, &parents,
-			     &protection_status));
+			     &snap_sizes, &parents, &protection_status));
   ASSERT_EQ(0u, snap_names.size());
   ASSERT_EQ(0u, snap_sizes.size());
-  ASSERT_EQ(0u, snap_features.size());
 
   ioctx.close();
 }

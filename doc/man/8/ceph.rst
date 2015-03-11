@@ -7,30 +7,57 @@
 Synopsis
 ========
 
-| **ceph** **auth** *add* *<entity>* {*<caps>* [*<caps>*...]}
+| **ceph** **auth** [ *add* \| *caps* \| *del* \| *export* \| *get* \| *get-key* \| *get-or-create* \| *get-or-create-key* \| *import* \| *list* \| *print-key* ] ...
 
-| **ceph** **auth** *export* *<entity>*
+| **ceph** **compact**
 
-| **ceph** **config-key** *get* *<key>*
+| **ceph** **config-key** [ *del* | *exists* | *get* | *list* | *put* ] ...
 
-| **ceph** **mds** *add_data_pool* *<pool>*
+| **ceph** **df**
 
-| **ceph** **mds** *getmap* {*<int[0-]>*}
+| **ceph** **fs** [ *ls* \| *new* \| *reset* \| *rm* ] ...
 
-| **ceph** **mon** *add* *<name>* <*IPaddr[:port]*>
+| **ceph** **fsid**
+
+| **ceph** **health**
+
+| **ceph** **heap** [ *dump* \| *start_profiler* \| *stop_profiler* \| *release* \| *stats* ] ...
+
+| **ceph** **injectargs** *<injectedargs>* [ *<injectedargs>*... ]
+
+| **ceph** **log** *<logtext>* [ *<logtext>*... ]
+
+| **ceph** **mds** [ *add_data_pool* \| *cluster_down* \| *cluster_up* \| *compat* \| *deactivate* \| *dump* \| *fail* \| *getmap* \| *newfs* \| *remove_data_pool* \| *rm* \| *rmfailed* \| *set* \| *set_max_mds* \| *set_state* \| *setmap* \| *stat* \| *stop* \| *tell* ] ...
+
+| **ceph** **mon** [ *add* \| *dump* \| *getmap* \| *remove* \| *stat* ] ...
 
 | **ceph** **mon_status**
 
-| **ceph** **osd** *create* {*<uuid>*}
+| **ceph** **osd** [ *blacklist* \| *blocked-by* \| *create* \| *deep-scrub* \| *df* \| *down* \| *dump* \| *erasure-code-profile* \| *find* \| *getcrushmap* \| *getmap* \| *getmaxosd* \| *in* \| *lspools* \| *map* \| *metadata* \| *out* \| *pause* \| *perf* \| *pg-temp* \| *primary-affinity* \| *primary-temp* \| *repair* \| *reweight* \| *reweight-by-pg* \| *rm* \| *scrub* \| *set* \| *setcrushmap* \| *setmaxosd*  \| *stat* \| *thrash* \| *tree* \| *unpause* \| *unset* ] ...
 
-| **ceph** **osd** **crush** *add* *<osdname (id|osd.id)>*
-*<float[0.0-]>* *<args>* [*<args>*...]
+| **ceph** **osd** **crush** [ *add* \| *add-bucket* \| *create-or-move* \| *dump* \| *get-tunable* \| *link* \| *move* \| *remove* \| *rename-bucket* \| *reweight* \| *reweight-all* \| *reweight-subtree* \| *rm* \| *rule* \| *set* \| *set-tunable* \| *show-tunables* \| *tunables* \| *unlink* ] ...
 
-| **ceph** **pg** *force_create_pg* *<pgid>*
+| **ceph** **osd** **pool** [ *create* \| *delete* \| *get* \| *get-quota* \| *ls* \| *mksnap* \| *rename* \| *rmsnap* \| *set* \| *set-quota* \| *stats* ] ...
 
-| **ceph** **pg** *stat*
+| **ceph** **osd** **tier** [ *add* \| *add-cache* \| *cache-mode* \| *remove* \| *remove-overlay* \| *set-overlay* ] ...
+
+| **ceph** **pg** [ *debug* \| *deep-scrub* \| *dump* \| *dump_json* \| *dump_pools_json* \| *dump_stuck* \| *force_create_pg* \| *getmap* \| *ls* \| *ls-by-osd* \| *ls-by-pool* \| *ls-by-primary* \| *map* \| *repair* \| *scrub* \| *send_pg_creates* \| *set_full_ratio* \| *set_nearfull_ratio* \| *stat* ] ...
+
+| **ceph** **quorum** [ *enter* \| *exit* ]
 
 | **ceph** **quorum_status**
+
+| **ceph** **report** { *<tags>* [ *<tags>...* ] }
+
+| **ceph** **scrub**
+
+| **ceph** **status**
+
+| **ceph** **sync** **force** {--yes-i-really-mean-it} {--i-know-what-i-am-doing}
+
+| **ceph** **tell** *<name (type.id)> <args> [<args>...]*
+
+| **ceph** **version**
 
 Description
 ===========

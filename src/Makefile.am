@@ -677,13 +677,13 @@ FORCE:
 # Otherwise, set it from the contents of .git_version.
 
 ceph_ver.h: .git_version
-	if [ -n "$$NO_VERSION" ] ; then \
-	    if [ ! -f ./ceph_ver.h ] ; then \
-	        $(srcdir)/make_version -n ./ceph_ver.h ; \
-	    fi; \
-        else \
-	    $(srcdir)/make_version $(srcdir)/.git_version ./ceph_ver.h ; \
-	fi
+if NO_VERSION
+	if [ ! -f ./ceph_ver.h ] ; then \
+		$(srcdir)/make_version -n ./ceph_ver.h ; \
+	fi; 
+else
+	$(srcdir)/make_version $(srcdir)/.git_version ./ceph_ver.h ; 
+endif
 
 ceph_ver.c: ./ceph_ver.h
 common/version.cc: ./ceph_ver.h

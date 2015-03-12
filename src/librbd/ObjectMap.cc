@@ -150,9 +150,7 @@ void ObjectMap::refresh(uint64_t snap_id)
   assert(m_image_ctx.snap_lock.is_locked());
   RWLock::WLocker l(m_image_ctx.object_map_lock);
 
-  uint64_t features;
-  m_image_ctx.get_features(snap_id, &features);
-  if ((features & RBD_FEATURE_OBJECT_MAP) == 0 ||
+  if ((m_image_ctx.features & RBD_FEATURE_OBJECT_MAP) == 0 ||
       (m_image_ctx.snap_id == snap_id && !m_image_ctx.snap_exists)) {
     m_object_map.clear();
     m_enabled = false;
@@ -166,17 +164,17 @@ void ObjectMap::refresh(uint64_t snap_id)
   std::string oid(object_map_name(m_image_ctx.id, snap_id));
   int r = cls_client::object_map_load(&m_image_ctx.md_ctx, oid,
                                       &m_object_map);
-  if (r < 0) { 
+  if (r < 0) {
     lderr(cct) << "error refreshing object map: " << cpp_strerror(r)
                << dendl;
     invalidate();
     m_object_map.clear();
     return;
   }
-  
+
   ldout(cct, 20) << "refreshed object map: " << m_object_map.size()
                  << dendl;
-  
+
   uint64_t num_objs = Striper::get_num_objects(
     m_image_ctx.layout, m_image_ctx.get_image_size(snap_id));
   if (m_object_map.size() != num_objs) {
@@ -195,9 +193,7 @@ void ObjectMap::rollback(uint64_t snap_id) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << &m_image_ctx << " rollback object map" << dendl;
 
-  uint64_t features;
-  m_image_ctx.get_features(snap_id, &features);
-  if ((features & RBD_FEATURE_OBJECT_MAP) == 0) {
+  if ((m_image_ctx.features & RBD_FEATURE_OBJECT_MAP) == 0) {
     r = m_image_ctx.md_ctx.remove(oid);
     if (r < 0 && r != -ENOENT) {
       lderr(cct) << "unable to remove object map: " << cpp_strerror(r)
@@ -235,9 +231,7 @@ void ObjectMap::rollback(uint64_t snap_id) {
 
 void ObjectMap::snapshot(uint64_t snap_id) {
   assert(m_image_ctx.snap_lock.is_wlocked());
-  uint64_t features;
-  m_image_ctx.get_features(CEPH_NOSNAP, &features);
-  if ((features & RBD_FEATURE_OBJECT_MAP) == 0) {
+  if ((m_image_ctx.features & RBD_FEATURE_OBJECT_MAP) == 0) {
     return;
   }
 

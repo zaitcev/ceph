@@ -1059,6 +1059,5 @@ AC_CONFIG_FILES([Makefile
 	src/ocf/rbd
 	src/java/Makefile
 	src/tracing/Makefile
-	man/Makefile
 	ceph.spec])
 AC_OUTPUT

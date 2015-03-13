@@ -101,6 +101,9 @@ int ErasureCodeShec::minimum_to_decode(const set<int> &want_to_decode,
     int minimum[k + m];
     int dm_ids[k];
 
+    std::fill_n(erased, k+m, 0);
+    std::fill_n(dm_ids, k, 0);
+
     for (int i = 0; i < k + m; i++) {
       erased[i] = 0;
       if (available_chunks.find(i) == available_chunks.end()) {

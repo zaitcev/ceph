@@ -1036,8 +1036,7 @@ void RGWListBuckets::execute()
   }
 
   if (supports_account_metadata()) {
-    /* XXX tenant needed? */
-    ret = rgw_get_user_attrs_by_uid(store, s->user.user_id.id, attrs);
+    ret = rgw_get_user_attrs_by_uid(store, s->user.user_id, attrs);
     if (ret < 0) {
       goto send_end;
     }
@@ -2236,8 +2235,7 @@ void RGWPutMetadataAccount::execute()
   }
 
   rgw_get_request_metadata(s->cct, s->info, attrs, false);
-  /* XXX tenant needed? */
-  rgw_get_user_attrs_by_uid(store, s->user.user_id.id, orig_attrs, &acct_op_tracker);
+  rgw_get_user_attrs_by_uid(store, s->user.user_id, orig_attrs, &acct_op_tracker);
   prepare_add_del_attrs(orig_attrs, rmattr_names, attrs, rmattrs);
   populate_with_generic_attrs(s, attrs);
 

@@ -1056,6 +1056,8 @@ struct req_state {
    string bucket_tenant;
    string bucket_name;
 
+   string account_name;
+
    rgw_bucket bucket;
    rgw_obj_key object;
    string src_tenant_name;
